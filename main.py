@@ -218,16 +218,20 @@ def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
         c = canvas.Canvas(tmp.name, pagesize=landscape(A6))
         width, height = landscape(A6)
-        margin = 8 * mm
 
-        y_top = height - margin
+        # Margins
+        top_margin = 8 * mm
+        side_margin = 8 * mm
+        bottom_margin = 12 * mm  # extra space for barcode
+
+        # Logo
         logo_path = "images/LOGON.jpg"
         logo_w, logo_h = 25 * mm, 25 * mm
-
+        y_top = height - top_margin
         if os.path.exists(logo_path):
             c.drawImage(
                 logo_path,
-                margin,
+                side_margin,
                 y_top - logo_h,
                 width=logo_w,
                 height=logo_h,
@@ -235,47 +239,48 @@ def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
                 mask="auto",
             )
 
-        from_x = margin + logo_w + 6 * mm
+        # FROM section
+        from_x = side_margin + logo_w + 6 * mm
         from_y = y_top - 6 * mm
-
         c.setFont("Helvetica-Bold", 10)
         c.drawString(from_x, from_y, "FROM:")
-
         c.setFont("Helvetica", 9)
         sender_lines = [
             "Luminous Candles Ltd T/A Nelux Candles",
             "71-75, Shelton Street, Covent Garden,",
             "London, United Kingdom, WC2H 9JQ",
         ]
-
         for i, line in enumerate(sender_lines):
             c.drawString(from_x, from_y - ((i + 1) * 5 * mm), line)
 
-        y_to_start = y_top - logo_h - 18 * mm
+        # TO section
         c.setFont("Helvetica-Bold", 11)
-        c.drawString(margin, y_to_start, "TO:")
+        y_to_start = y_top - logo_h - 20 * mm  # shifted slightly upward
+        c.drawString(side_margin, y_to_start, "TO:")
 
         c.setFont("Helvetica-Bold", 14)
         line_gap = 6 * mm
-
-        lines = [
+        to_lines = [
             customer.get("fullName", ""),
             customer.get("address", ""),
             f"{customer.get('city', '')}, {customer.get('state', '')} {customer.get('zip', '')}",
             customer.get("country", "GB"),
         ]
 
-        start_y = y_to_start - 10 * mm
-
-        for i, text in enumerate(lines):
+        # Compute vertical space for TO block
+        total_text_height = len(to_lines) * line_gap
+        start_y = y_to_start - 4 * mm  # small gap after "TO:"
+        for i, text in enumerate(to_lines):
             c.drawCentredString(width / 2, start_y - (i * line_gap), text)
 
+        # Barcode at bottom with proper margin
         barcode_height = 20 * mm
         barcode = code128.Code128(order_id, barHeight=barcode_height, barWidth=0.5 * mm)
         barcode_x = (width - barcode.width) / 2
-        barcode_y = margin
+        barcode_y = bottom_margin
         barcode.drawOn(c, barcode_x, barcode_y)
 
+        # Save PDF
         c.showPage()
         c.save()
         return tmp.name
@@ -283,6 +288,7 @@ def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
     except Exception as e:
         print(f"[ERROR] Failed to generate label: {e}")
         return None
+
 
 # ----------------- Checkout API -----------------
 @app.post("/create-checkout-session")
