@@ -44,7 +44,7 @@ app = FastAPI(title="Luminous Candles API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://172.25.0.1:3033", 
+        "https://iluminous-candle-uk-fe.onrender.com", 
         "http://172.28.64.2:3033",    
         "http://192.168.178.65:3033",
         "http://127.0.0.1:3033"
