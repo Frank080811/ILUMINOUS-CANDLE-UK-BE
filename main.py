@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 ENV = os.getenv("ENV", "development")  # "production" or "development"
+FRONTEND_URL = os.getenv("FRONTEND_URL", "https://iluminous-candle-uk-fe.onrender.com")
 
 if ENV == "production":
     STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY_LIVE")
@@ -35,7 +36,6 @@ ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
 
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
-YOUR_DOMAIN = "http://localhost:3001" if ENV != "production" else "https://your-production-domain.com"
 sg_client = SendGridAPIClient(SENDGRID_API_KEY)
 
 # ================== FastAPI Setup ==================
@@ -44,11 +44,11 @@ app = FastAPI(title="Luminous Candles API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://iluminous-candle-uk-fe.onrender.com", 
-        "http://172.28.64.2:3033",    
+        FRONTEND_URL,
+        "https://iluminous-candle-uk-fe.onrender.com",
         "http://192.168.178.65:3033",
-        "http://127.0.0.1:3033"
-        "http://localhost:3033"
+        "http://127.0.0.1:3033",
+        "http://localhost:3033",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -58,14 +58,14 @@ app.add_middleware(
 # ----------------- Root Route -----------------
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    return """
+    return f"""
     <html>
       <head>
         <title>Luminous Candles API</title>
         <style>
-          body { font-family: Arial; text-align: center; margin-top: 10%; background: #fafafa; color: #333; }
-          h1 { color: #d4a017; }
-          p { font-size: 1.1em; }
+          body {{ font-family: Arial; text-align: center; margin-top: 10%; background: #fafafa; color: #333; }}
+          h1 {{ color: #d4a017; }}
+          p {{ font-size: 1.1em; }}
         </style>
       </head>
       <body>
@@ -110,26 +110,23 @@ ORDERS_DB = {}
 # ----------------- Stripe Payment Link -----------------
 def create_payment_link(items: List[Item], customer: CustomerInfo, total: float, checkout_id: str) -> str:
     try:
-        # 1️⃣ Base product line items
         line_items = [
             {
                 "price_data": {
                     "currency": "gbp",
                     "product_data": {"name": item.name},
-                    "unit_amount": int(item.price * 100),  # Convert £ to pence
+                    "unit_amount": int(item.price * 100),
                 },
                 "quantity": item.qty,
             }
             for item in items
         ]
 
-        # 2️⃣ Compute subtotal/tax/shipping same way as backend
         subtotal = sum(item.price * item.qty for item in items)
         tax_rate = get_tax_rate_by_state(customer.state)
         tax = round(subtotal * tax_rate, 2)
         shipping = 5.99 if subtotal <= 50 else 0.0
 
-        # 3️⃣ Add tax and shipping as separate line items so Stripe shows the full total
         if tax > 0:
             line_items.append({
                 "price_data": {
@@ -150,16 +147,14 @@ def create_payment_link(items: List[Item], customer: CustomerInfo, total: float,
                 "quantity": 1,
             })
 
-        # 4️⃣ Allowed shipping countries
         allowed_countries = ["US", "CA", "GB", "DE"]
 
-        # 5️⃣ Create Stripe checkout session
         session = stripe.checkout.Session.create(
             payment_method_types=["card"],
             line_items=line_items,
             mode="payment",
-            success_url=f"http://172.25.0.1:3033/success.html?checkoutId={checkout_id}",
-            cancel_url=f"http://172.25.0.1:3033/cancel.html",
+            success_url=f"{FRONTEND_URL}/success.html?checkoutId={checkout_id}",
+            cancel_url=f"{FRONTEND_URL}/cancel.html",
             customer_email=customer.email,
             shipping_address_collection={"allowed_countries": allowed_countries},
         )
@@ -172,7 +167,6 @@ def create_payment_link(items: List[Item], customer: CustomerInfo, total: float,
         raise HTTPException(status_code=400, detail=e.user_message or str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ----------------- Email Utility -----------------
 def send_email(to_email: str, subject: str, html_content: str, attachments: list[str] = None):
@@ -219,28 +213,17 @@ def get_tax_rate_by_state(state: str) -> float:
     return tax_rates.get(state, 0.07)
 
 # ----------------- Label Generator -----------------
-
-
-
 def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
-    """
-    Generates a professional A6 shipping label.
-    Clean layout — no top barcode, clear sender block, centered recipient, large bottom barcode.
-    """
     try:
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
         c = canvas.Canvas(tmp.name, pagesize=landscape(A6))
         width, height = landscape(A6)
         margin = 8 * mm
 
-        # =========================================================
-        # HEADER (Logo + FROM info, neatly aligned)
-        # =========================================================
         y_top = height - margin
         logo_path = "images/LOGON.jpg"
         logo_w, logo_h = 25 * mm, 25 * mm
 
-        # Draw logo on the left
         if os.path.exists(logo_path):
             c.drawImage(
                 logo_path,
@@ -252,7 +235,6 @@ def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
                 mask="auto",
             )
 
-        # FROM section (aligned nicely next to logo)
         from_x = margin + logo_w + 6 * mm
         from_y = y_top - 6 * mm
 
@@ -269,19 +251,13 @@ def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
         for i, line in enumerate(sender_lines):
             c.drawString(from_x, from_y - ((i + 1) * 5 * mm), line)
 
-        # =========================================================
-        # TO SECTION (Centered, Bold, Large Font)
-        # =========================================================
-        # Position TO block clearly below header
         y_to_start = y_top - logo_h - 18 * mm
         c.setFont("Helvetica-Bold", 11)
         c.drawString(margin, y_to_start, "TO:")
 
-        # Recipient info centered
         c.setFont("Helvetica-Bold", 14)
         line_gap = 6 * mm
 
-        # Gather lines safely
         lines = [
             customer.get("fullName", ""),
             customer.get("address", ""),
@@ -289,30 +265,17 @@ def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
             customer.get("country", "GB"),
         ]
 
-        # Compute starting vertical position for centered TO block
-        total_text_height = len(lines) * line_gap
         start_y = y_to_start - 10 * mm
 
         for i, text in enumerate(lines):
             c.drawCentredString(width / 2, start_y - (i * line_gap), text)
 
-        # =========================================================
-        # LARGE BOTTOM BARCODE
-        # =========================================================
         barcode_height = 20 * mm
-        barcode = code128.Code128(
-            order_id,
-            barHeight=barcode_height,
-            barWidth=0.5 * mm,  # wider bars for clarity
-        )
-
+        barcode = code128.Code128(order_id, barHeight=barcode_height, barWidth=0.5 * mm)
         barcode_x = (width - barcode.width) / 2
         barcode_y = margin
         barcode.drawOn(c, barcode_x, barcode_y)
 
-        # =========================================================
-        # Save PDF
-        # =========================================================
         c.showPage()
         c.save()
         return tmp.name
@@ -320,7 +283,6 @@ def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
     except Exception as e:
         print(f"[ERROR] Failed to generate label: {e}")
         return None
-
 
 # ----------------- Checkout API -----------------
 @app.post("/create-checkout-session")
