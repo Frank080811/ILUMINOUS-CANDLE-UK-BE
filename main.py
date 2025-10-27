@@ -123,20 +123,9 @@ def create_payment_link(items: List[Item], customer: CustomerInfo, total: float,
         ]
 
         subtotal = sum(item.price * item.qty for item in items)
-        tax_rate = get_tax_rate_by_state(customer.state)
-        tax = round(subtotal * tax_rate, 2)
         shipping = 5.99 if subtotal <= 50 else 0.0
 
-        if tax > 0:
-            line_items.append({
-                "price_data": {
-                    "currency": "gbp",
-                    "product_data": {"name": "Sales Tax"},
-                    "unit_amount": int(tax * 100),
-                },
-                "quantity": 1,
-            })
-
+        # Add shipping if applicable (No tax anymore)
         if shipping > 0:
             line_items.append({
                 "price_data": {
@@ -199,19 +188,6 @@ def send_email(to_email: str, subject: str, html_content: str, attachments: list
         print(f"[ERROR] Email failed to {to_email}: {e}")
         return False
 
-# ----------------- Tax Helper -----------------
-def get_tax_rate_by_state(state: str) -> float:
-    tax_rates = {
-        "California": 0.075,
-        "New York": 0.04,
-        "Texas": 0.045,
-        "Florida": 0.06,
-        "Illinois": 0.0625,
-        "Nevada": 0.0685,
-        "Washington": 0.065,
-    }
-    return tax_rates.get(state, 0.07)
-
 # ----------------- Label Generator -----------------
 def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
     try:
@@ -222,7 +198,7 @@ def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
         # Margins
         top_margin = 8 * mm
         side_margin = 8 * mm
-        bottom_margin = 12 * mm  # extra space for barcode
+        bottom_margin = 20 * mm  # Increased to give more room for barcode
 
         # Logo
         logo_path = "images/LOGON.jpg"
@@ -253,12 +229,12 @@ def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
         for i, line in enumerate(sender_lines):
             c.drawString(from_x, from_y - ((i + 1) * 5 * mm), line)
 
-        # TO section
+        # TO section (moved slightly upward)
         c.setFont("Helvetica-Bold", 11)
-        y_to_start = y_top - logo_h - 20 * mm  # shifted slightly upward
+        y_to_start = y_top - logo_h - 10 * mm  # raised upward by 10mm
         c.drawString(side_margin, y_to_start, "TO:")
 
-        c.setFont("Helvetica-Bold", 14)
+        c.setFont("Helvetica-Bold", 13)
         line_gap = 6 * mm
         to_lines = [
             customer.get("fullName", ""),
@@ -266,21 +242,16 @@ def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
             f"{customer.get('city', '')}, {customer.get('state', '')} {customer.get('zip', '')}",
             customer.get("country", "GB"),
         ]
-
-        # Compute vertical space for TO block
-        total_text_height = len(to_lines) * line_gap
-        start_y = y_to_start - 4 * mm  # small gap after "TO:"
+        start_y = y_to_start - 4 * mm
         for i, text in enumerate(to_lines):
             c.drawCentredString(width / 2, start_y - (i * line_gap), text)
 
-        # Barcode at bottom with proper margin
-        barcode_height = 20 * mm
-        barcode = code128.Code128(order_id, barHeight=barcode_height, barWidth=0.5 * mm)
+        # Barcode centered at bottom with margin
+        barcode = code128.Code128(order_id, barHeight=18 * mm, barWidth=0.45 * mm)
         barcode_x = (width - barcode.width) / 2
         barcode_y = bottom_margin
         barcode.drawOn(c, barcode_x, barcode_y)
 
-        # Save PDF
         c.showPage()
         c.save()
         return tmp.name
@@ -298,10 +269,9 @@ async def create_checkout_session(request: CheckoutRequest):
         subtotal = sum(item.price * item.qty for item in request.cart)
         if subtotal < 0.5:
             raise HTTPException(status_code=400, detail="Order total must be at least £0.50")
-        tax_rate = get_tax_rate_by_state(request.customer.state)
-        tax = round(subtotal * tax_rate, 2)
+
         shipping = 5.99 if subtotal <= 50 else 0.0
-        total = round(subtotal + tax + shipping, 2)
+        total = round(subtotal + shipping, 2)  # ✅ Tax removed
 
         checkout_id = str(uuid.uuid4())
         checkout_url = create_payment_link(request.cart, request.customer, total, checkout_id)
@@ -311,7 +281,6 @@ async def create_checkout_session(request: CheckoutRequest):
             "customer": request.customer.dict(),
             "cart": [i.dict() for i in request.cart],
             "subtotal": subtotal,
-            "tax": tax,
             "shipping": shipping,
             "total": total,
         }
@@ -346,7 +315,6 @@ async def payment_success(req: SuccessRequest):
     <p><b>Order ID:</b> {req.checkoutId}</p>
     <ul>{items_html}</ul>
     <p>Subtotal: £{order['subtotal']:.2f}<br>
-       Tax: £{order['tax']:.2f}<br>
        Shipping: £{order['shipping']:.2f}<br>
        <b>Total: £{order['total']:.2f}</b></p>
     """
