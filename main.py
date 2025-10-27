@@ -16,6 +16,8 @@ from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileT
 import base64
 import stripe
 from dotenv import load_dotenv
+from fastapi import FastAPI, Request
+
 
 # ================== Load Environment Variables ==================
 load_dotenv()
