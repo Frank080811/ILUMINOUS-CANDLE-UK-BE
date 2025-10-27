@@ -189,6 +189,33 @@ def send_email(to_email: str, subject: str, html_content: str, attachments: list
         return False
 
 # ----------------- Label Generator -----------------
+
+@app.post("/stripe-webhook")
+async def stripe_webhook(request: Request):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)
+    except ValueError:
+        return HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError:
+        return HTTPException(status_code=400, detail="Invalid signature")
+
+    if event['type'] == 'checkout.session.completed':
+        session = event['data']['object']
+        checkout_id = session['client_reference_id']
+        customer_email = session.get('customer_email')
+        order = ORDERS_DB.get(checkout_id)
+
+        if order:
+            html = "<p>Order confirmed!</p>"
+            send_email(customer_email, "Your Order Confirmation", html)
+    
+    return {"status": "success"}
+
+
 def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
     try:
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
