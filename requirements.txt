@@ -15,4 +15,5 @@ python-dotenv
 stripe
 sendgrid
 reportlab
+sqlalchemy>=2.0.0
 
