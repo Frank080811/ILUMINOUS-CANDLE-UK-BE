@@ -17,6 +17,8 @@ import base64
 import stripe
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
+from database import SessionLocal, init_db, Order
+
 
 
 # ================== Load Environment Variables ==================
@@ -42,6 +44,8 @@ sg_client = SendGridAPIClient(SENDGRID_API_KEY)
 
 # ================== FastAPI Setup ==================
 app = FastAPI(title="Luminous Candles API", version="1.0.0")
+
+init_db()
 
 app.add_middleware(
     CORSMiddleware,
@@ -107,7 +111,7 @@ class SuccessRequest(BaseModel):
     client_email: EmailStr
 
 # ----------------- Storage -----------------
-ORDERS_DB = {}
+
 
 # ----------------- Stripe Payment Link -----------------
 def create_payment_link(items: List[Item], customer: CustomerInfo, total: float, checkout_id: str) -> str:
@@ -316,14 +320,19 @@ async def create_checkout_session(request: CheckoutRequest):
         checkout_id = str(uuid.uuid4())
         checkout_url = create_payment_link(request.cart, request.customer, total, checkout_id)
 
-        ORDERS_DB[checkout_id] = {
-            "id": checkout_id,
-            "customer": request.customer.dict(),
-            "cart": [i.dict() for i in request.cart],
-            "subtotal": subtotal,
-            "shipping": shipping,
-            "total": total,
-        }
+        db = SessionLocal()
+        order = Order(
+            id=checkout_id,
+            customer=request.customer.dict(),
+            cart=[i.dict() for i in request.cart],
+            subtotal=subtotal,
+            shipping=shipping,
+            total=total,
+    )
+    db.add(order)
+    db.commit()
+    db.close()
+
 
         return {"url": checkout_url}
     except Exception as e:
@@ -332,18 +341,30 @@ async def create_checkout_session(request: CheckoutRequest):
 # ----------------- Order Fetch -----------------
 @app.get("/order/{checkout_id}")
 async def get_order(checkout_id: str):
-    order = ORDERS_DB.get(checkout_id)
+    db = SessionLocal()
+    order = db.query(Order).filter(Order.id == checkout_id).first()
+    db.close()
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
-    return order
+    return {
+    "id": order.id,
+    "customer": order.customer,
+    "cart": order.cart,
+    "subtotal": order.subtotal,
+    "shipping": order.shipping,
+    "total": order.total,
+}
+
 
 # ----------------- Payment Success -----------------
 @app.post("/payment-success")
 async def payment_success(req: SuccessRequest):
-    if not req.checkoutId or req.checkoutId not in ORDERS_DB:
+    db = SessionLocal()
+    order = db.query(Order).filter(Order.id == req.checkoutId).first()
+    if not order:
+        db.close()
         raise HTTPException(status_code=404, detail="Order not found")
 
-    order = ORDERS_DB[req.checkoutId]
     items_html = "".join([
         f"<li>{item['qty']} × {item['name']} — £{item['price']*item['qty']:.2f}</li>"
         for item in order["cart"]
