@@ -161,34 +161,45 @@ def create_payment_link(items: List[Item], customer: CustomerInfo, total: float,
 
 # ----------------- Email Utility -----------------
 def send_email(to_email: str, subject: str, html_content: str, attachments: list[str] = None):
-    message = Mail(
-        from_email=FROM_EMAIL,
-        to_emails=to_email,
-        subject=subject,
-        html_content=html_content,
-    )
-
-    if attachments:
-        for filepath in attachments:
-            try:
-                with open(filepath, "rb") as f:
-                    encoded = base64.b64encode(f.read()).decode()
-                    message.attachment = Attachment(
-                        FileContent(encoded),
-                        FileName(os.path.basename(filepath)),
-                        FileType("application/pdf"),
-                        Disposition("attachment"),
-                    )
-            except Exception as e:
-                print(f"[WARN] Could not attach file {filepath}: {e}")
-
     try:
-        response = sg_client.send(message)
-        print(f"[OK] Email sent to {to_email}, Status: {response.status_code}")
+        message = Mail(
+            from_email=FROM_EMAIL,
+            to_emails=to_email,
+            subject=subject,
+            html_content=html_content,
+        )
+        message.content_subtype = "html"
+
+        # Attach files if any
+        if attachments:
+            for filepath in attachments:
+                if os.path.exists(filepath):
+                    with open(filepath, "rb") as f:
+                        encoded = base64.b64encode(f.read()).decode()
+                        attachment = Attachment(
+                            FileContent(encoded),
+                            FileName(os.path.basename(filepath)),
+                            FileType("application/pdf"),
+                            Disposition("attachment"),
+                        )
+                        message.add_attachment(attachment)
+                else:
+                    print(f"[WARN] Attachment not found: {filepath}")
+
+        # Always reinitialize SendGrid client to avoid stale session
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+        response = sg.send(message)
+
+        print(f"[OK] Email sent → {to_email} | Status: {response.status_code}")
+        if response.status_code not in (200, 202):
+            print(f"[WARN] SendGrid Response Body: {response.body}")
+
         return True
+
     except Exception as e:
-        print(f"[ERROR] Email failed to {to_email}: {e}")
+        print(f"[ERROR] Failed to send email to {to_email}: {e}")
         return False
+
 
 # ----------------- Label Generator -----------------
 
