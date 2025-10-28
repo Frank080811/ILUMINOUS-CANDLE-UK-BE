@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, conint, confloat, EmailStr
@@ -6,7 +6,7 @@ import uuid
 import warnings
 import tempfile
 import os
-from typing import List
+from typing import List, Optional
 from reportlab.pdfgen import canvas
 from reportlab.graphics.barcode import code128
 from reportlab.lib.pagesizes import landscape, A6
@@ -16,9 +16,8 @@ from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileT
 import base64
 import stripe
 from dotenv import load_dotenv
-from fastapi import FastAPI, Request
-from database import SessionLocal, init_db, Order
 
+from database import SessionLocal, init_db, Order  # SQLAlchemy session + model
 
 
 # ================== Load Environment Variables ==================
@@ -39,8 +38,6 @@ FROM_EMAIL = os.getenv("FROM_EMAIL")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
 
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
-
-sg_client = SendGridAPIClient(SENDGRID_API_KEY)
 
 # ================== FastAPI Setup ==================
 app = FastAPI(title="Luminous Candles API", version="1.0.0")
@@ -82,6 +79,7 @@ async def home():
     </html>
     """
 
+
 # ----------------- Models -----------------
 class Item(BaseModel):
     name: str
@@ -107,10 +105,43 @@ class SuccessRequest(BaseModel):
     customer: CustomerInfo
     cart: List[Item]
     total: confloat(gt=0)
-    checkoutId: str | None = None
+    checkoutId: Optional[str] = None
     client_email: EmailStr
 
-# ----------------- Storage -----------------
+
+# ----------------- Email Utility -----------------
+def send_email(to_email: str, subject: str, html_content: str, attachments: list[str] | None = None) -> bool:
+    try:
+        message = Mail(
+            from_email=FROM_EMAIL,
+            to_emails=to_email,
+            subject=subject,
+            html_content=html_content,
+        )
+        message.content_subtype = "html"
+
+        if attachments:
+            for filepath in attachments:
+                if os.path.exists(filepath):
+                    with open(filepath, "rb") as f:
+                        encoded = base64.b64encode(f.read()).decode()
+                        attachment = Attachment(
+                            FileContent(encoded),
+                            FileName(os.path.basename(filepath)),
+                            FileType("application/pdf"),
+                            Disposition("attachment"),
+                        )
+                        message.add_attachment(attachment)
+                else:
+                    print(f"[WARN] Attachment not found: {filepath}")
+
+        sg = SendGridAPIClient(SENDGRID_API_KEY)
+        response = sg.send(message)
+        print(f"[OK] Email sent → {to_email} | Status: {response.status_code}")
+        return response.status_code in (200, 202)
+    except Exception as e:
+        print(f"[ERROR] Failed to send email to {to_email}: {e}")
+        return False
 
 
 # ----------------- Stripe Payment Link -----------------
@@ -131,7 +162,6 @@ def create_payment_link(items: List[Item], customer: CustomerInfo, total: float,
         subtotal = sum(item.price * item.qty for item in items)
         shipping = 5.99 if subtotal <= 50 else 0.0
 
-        # Add shipping if applicable (No tax anymore)
         if shipping > 0:
             line_items.append({
                 "price_data": {
@@ -152,6 +182,7 @@ def create_payment_link(items: List[Item], customer: CustomerInfo, total: float,
             cancel_url=f"{FRONTEND_URL}/cancel.html",
             customer_email=customer.email,
             shipping_address_collection={"allowed_countries": allowed_countries},
+            client_reference_id=checkout_id,  # ✅ so webhook can match order
         )
 
         print(f"✅ Stripe session created: {session.url}")
@@ -163,77 +194,9 @@ def create_payment_link(items: List[Item], customer: CustomerInfo, total: float,
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ----------------- Email Utility -----------------
-def send_email(to_email: str, subject: str, html_content: str, attachments: list[str] = None):
-    try:
-        message = Mail(
-            from_email=FROM_EMAIL,
-            to_emails=to_email,
-            subject=subject,
-            html_content=html_content,
-        )
-        message.content_subtype = "html"
-
-        # Attach files if any
-        if attachments:
-            for filepath in attachments:
-                if os.path.exists(filepath):
-                    with open(filepath, "rb") as f:
-                        encoded = base64.b64encode(f.read()).decode()
-                        attachment = Attachment(
-                            FileContent(encoded),
-                            FileName(os.path.basename(filepath)),
-                            FileType("application/pdf"),
-                            Disposition("attachment"),
-                        )
-                        message.add_attachment(attachment)
-                else:
-                    print(f"[WARN] Attachment not found: {filepath}")
-
-        # Always reinitialize SendGrid client to avoid stale session
-        sg = SendGridAPIClient(SENDGRID_API_KEY)
-        response = sg.send(message)
-
-        print(f"[OK] Email sent → {to_email} | Status: {response.status_code}")
-        if response.status_code not in (200, 202):
-            print(f"[WARN] SendGrid Response Body: {response.body}")
-
-        return True
-
-    except Exception as e:
-        print(f"[ERROR] Failed to send email to {to_email}: {e}")
-        return False
-
 
 # ----------------- Label Generator -----------------
-
-@app.post("/stripe-webhook")
-async def stripe_webhook(request: Request):
-    payload = await request.body()
-    sig_header = request.headers.get("stripe-signature")
-    endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
-
-    try:
-        event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)
-    except ValueError:
-        return HTTPException(status_code=400, detail="Invalid payload")
-    except stripe.error.SignatureVerificationError:
-        return HTTPException(status_code=400, detail="Invalid signature")
-
-    if event['type'] == 'checkout.session.completed':
-        session = event['data']['object']
-        checkout_id = session['client_reference_id']
-        customer_email = session.get('customer_email')
-        order = ORDERS_DB.get(checkout_id)
-
-        if order:
-            html = "<p>Order confirmed!</p>"
-            send_email(customer_email, "Your Order Confirmation", html)
-    
-    return {"status": "success"}
-
-
-def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
+def generate_local_label(order_obj: Order, customer: dict, order_id: str) -> str | None:
     try:
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
         c = canvas.Canvas(tmp.name, pagesize=landscape(A6))
@@ -275,7 +238,7 @@ def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
 
         # TO section (moved slightly upward)
         c.setFont("Helvetica-Bold", 11)
-        y_to_start = y_top - logo_h - 10 * mm  # raised upward by 10mm
+        y_to_start = y_top - logo_h - 10 * mm
         c.drawString(side_margin, y_to_start, "TO:")
 
         c.setFont("Helvetica-Bold", 13)
@@ -309,6 +272,7 @@ def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
 @app.post("/create-checkout-session")
 async def create_checkout_session(request: CheckoutRequest):
     print("✅ Checkout request received:", request.dict())
+    db = SessionLocal()
     try:
         subtotal = sum(item.price * item.qty for item in request.cart)
         if subtotal < 0.5:
@@ -320,68 +284,114 @@ async def create_checkout_session(request: CheckoutRequest):
         checkout_id = str(uuid.uuid4())
         checkout_url = create_payment_link(request.cart, request.customer, total, checkout_id)
 
-        db = SessionLocal()
         order = Order(
             id=checkout_id,
             customer=request.customer.dict(),
             cart=[i.dict() for i in request.cart],
-            subtotal=subtotal,
-            shipping=shipping,
-            total=total,
-    )
-    db.add(order)
-    db.commit()
-    db.close()
-
+            subtotal=float(subtotal),
+            shipping=float(shipping),
+            total=float(total),
+        )
+        db.add(order)
+        db.commit()
 
         return {"url": checkout_url}
     except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        db.close()
+
 
 # ----------------- Order Fetch -----------------
 @app.get("/order/{checkout_id}")
 async def get_order(checkout_id: str):
     db = SessionLocal()
-    order = db.query(Order).filter(Order.id == checkout_id).first()
-    db.close()
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    return {
-    "id": order.id,
-    "customer": order.customer,
-    "cart": order.cart,
-    "subtotal": order.subtotal,
-    "shipping": order.shipping,
-    "total": order.total,
-}
+    try:
+        order = db.query(Order).filter(Order.id == checkout_id).first()
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        return {
+            "id": order.id,
+            "customer": order.customer,
+            "cart": order.cart,
+            "subtotal": order.subtotal,
+            "shipping": order.shipping,
+            "total": order.total,
+        }
+    finally:
+        db.close()
 
 
-# ----------------- Payment Success -----------------
+# ----------------- Payment Success (manual success page) -----------------
 @app.post("/payment-success")
 async def payment_success(req: SuccessRequest):
     db = SessionLocal()
-    order = db.query(Order).filter(Order.id == req.checkoutId).first()
-    if not order:
+    try:
+        order = db.query(Order).filter(Order.id == req.checkoutId).first()
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        items_html = "".join(
+            f"<li>{item['qty']} × {item['name']} — £{float(item['price']) * int(item['qty']):.2f}</li>"
+            for item in order.cart
+        )
+
+        html = f"""
+        <h2>Order Confirmation</h2>
+        <p>Thank you for your order, {req.customer.fullName}!</p>
+        <p><b>Order ID:</b> {req.checkoutId}</p>
+        <ul>{items_html}</ul>
+        <p>Subtotal: £{order.subtotal:.2f}<br>
+           Shipping: £{order.shipping:.2f}<br>
+           <b>Total: £{order.total:.2f}</b></p>
+        """
+
+        send_email(req.client_email, "Your Order Confirmation", html)
+        label = generate_local_label(order, req.customer.dict(), req.checkoutId or order.id)
+        if label:
+            send_email(ADMIN_EMAIL, f"New Order ({req.checkoutId})", html, [label])
+        else:
+            send_email(ADMIN_EMAIL, f"New Order ({req.checkoutId})", html)
+
+        return {"status": "success", "message": "Order confirmed and emails sent"}
+    finally:
         db.close()
-        raise HTTPException(status_code=404, detail="Order not found")
 
-    items_html = "".join([
-        f"<li>{item['qty']} × {item['name']} — £{item['price']*item['qty']:.2f}</li>"
-        for item in order["cart"]
-    ])
 
-    html = f"""
-    <h2>Order Confirmation</h2>
-    <p>Thank you for your order, {req.customer.fullName}!</p>
-    <p><b>Order ID:</b> {req.checkoutId}</p>
-    <ul>{items_html}</ul>
-    <p>Subtotal: £{order['subtotal']:.2f}<br>
-       Shipping: £{order['shipping']:.2f}<br>
-       <b>Total: £{order['total']:.2f}</b></p>
-    """
+# ----------------- Stripe Webhook -----------------
+@app.post("/stripe-webhook")
+async def stripe_webhook(request: Request):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    endpoint_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
 
-    send_email(req.client_email, "Your Order Confirmation", html)
-    label = generate_local_label(order, req.customer.dict(), req.checkoutId)
-    send_email(ADMIN_EMAIL, f"New Order ({req.checkoutId})", html, [label] if label else None)
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, endpoint_secret)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
 
-    return {"status": "success", "message": "Order confirmed and emails sent"}
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        checkout_id = session.get("client_reference_id")
+        customer_email = session.get("customer_email")
+
+        if checkout_id:
+            db = SessionLocal()
+            try:
+                order = db.query(Order).filter(Order.id == checkout_id).first()
+                if order:
+                    html = f"""
+                    <h2>Order Confirmed</h2>
+                    <p><b>Order ID:</b> {order.id}</p>
+                    <p>Total: £{order.total:.2f}</p>
+                    """
+                    if customer_email:
+                        send_email(customer_email, "Your Order Confirmation", html)
+                    send_email(ADMIN_EMAIL, f"New Order ({order.id})", html)
+            finally:
+                db.close()
+
+    return {"status": "success"}
