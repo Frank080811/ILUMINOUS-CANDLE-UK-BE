@@ -112,6 +112,9 @@ class SuccessRequest(BaseModel):
 # ----------------- Email Utility -----------------
 def send_email(to_email: str, subject: str, html_content: str, attachments: list[str] | None = None) -> bool:
     try:
+        print(f"[EMAIL] Preparing to send to {to_email}")
+        print(f"FROM_EMAIL={FROM_EMAIL}, SENDGRID_API_KEY={'SET' if SENDGRID_API_KEY else 'MISSING'}")
+
         message = Mail(
             from_email=FROM_EMAIL,
             to_emails=to_email,
@@ -120,6 +123,7 @@ def send_email(to_email: str, subject: str, html_content: str, attachments: list
         )
         message.content_subtype = "html"
 
+        # Attachments (if any)
         if attachments:
             for filepath in attachments:
                 if os.path.exists(filepath):
@@ -137,12 +141,17 @@ def send_email(to_email: str, subject: str, html_content: str, attachments: list
 
         sg = SendGridAPIClient(SENDGRID_API_KEY)
         response = sg.send(message)
-        print(f"[OK] Email sent → {to_email} | Status: {response.status_code}")
-        return response.status_code in (200, 202)
-    except Exception as e:
-        print(f"[ERROR] Failed to send email to {to_email}: {e}")
-        return False
 
+        print(f"[SENDGRID RESPONSE] → {to_email}")
+        print(f"Status: {response.status_code}")
+        print(f"Body: {response.body}")
+        print(f"Headers: {response.headers}")
+
+        return response.status_code in (200, 202)
+
+    except Exception as e:
+        print(f"[ERROR] Email send failed → {to_email}: {e}")
+        return False
 
 # ----------------- Stripe Payment Link -----------------
 def create_payment_link(items: List[Item], customer: CustomerInfo, total: float, checkout_id: str) -> str:
@@ -326,12 +335,17 @@ async def get_order(checkout_id: str):
 # ----------------- Payment Success (manual success page) -----------------
 @app.post("/payment-success")
 async def payment_success(req: SuccessRequest):
+    """
+    Triggered by success.html after checkout completes.
+    Sends confirmation email to client and admin with label PDF.
+    """
     db = SessionLocal()
     try:
         order = db.query(Order).filter(Order.id == req.checkoutId).first()
         if not order:
             raise HTTPException(status_code=404, detail="Order not found")
 
+        # 🧾 Build HTML email body
         items_html = "".join(
             f"<li>{item['qty']} × {item['name']} — £{float(item['price']) * int(item['qty']):.2f}</li>"
             for item in order.cart
@@ -347,16 +361,31 @@ async def payment_success(req: SuccessRequest):
            <b>Total: £{order.total:.2f}</b></p>
         """
 
-        send_email(req.client_email, "Your Order Confirmation", html)
-        label = generate_local_label(order, req.customer.dict(), req.checkoutId or order.id)
-        if label:
-            send_email(ADMIN_EMAIL, f"New Order ({req.checkoutId})", html, [label])
-        else:
-            send_email(ADMIN_EMAIL, f"New Order ({req.checkoutId})", html)
+        # 📨 Send to customer
+        sent_to_customer = send_email(req.client_email, "Your Order Confirmation", html)
 
-        return {"status": "success", "message": "Order confirmed and emails sent"}
+        # 📦 Generate and attach label PDF (optional)
+        label = generate_local_label(order, req.customer.dict(), req.checkoutId or order.id)
+
+        # 📨 Send to admin
+        if label:
+            sent_to_admin = send_email(ADMIN_EMAIL, f"New Order ({req.checkoutId})", html, [label])
+        else:
+            sent_to_admin = send_email(ADMIN_EMAIL, f"New Order ({req.checkoutId})", html)
+
+        if sent_to_customer or sent_to_admin:
+            print(f"[EMAIL SUCCESS] Notifications sent for order {req.checkoutId}")
+            return {"status": "success", "message": "Emails sent successfully"}
+        else:
+            print(f"[EMAIL FAIL] Unable to send one or more emails for order {req.checkoutId}")
+            raise HTTPException(status_code=500, detail="Failed to send emails")
+
+    except Exception as e:
+        print(f"[ERROR] /payment-success failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
+
 
 
 # ----------------- Stripe Webhook -----------------
