@@ -7,15 +7,18 @@ import warnings
 import tempfile
 import os
 from typing import List
+
 from reportlab.pdfgen import canvas
 from reportlab.graphics.barcode import code128
 from reportlab.lib.pagesizes import landscape, A6
 from reportlab.lib.units import mm
-from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail, Attachment, FileContent, FileName, FileType, Disposition
-import base64
+
 import stripe
 from dotenv import load_dotenv
+
+# ✅ SMTP imports (Google/Gmail SMTP)
+import smtplib
+from email.message import EmailMessage
 
 # ================== Load Environment Variables ==================
 load_dotenv()
@@ -30,16 +33,29 @@ else:
 
 stripe.api_key = STRIPE_SECRET_KEY
 
-SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
-FROM_EMAIL = os.getenv("FROM_EMAIL")
+# ✅ SMTP env vars (set these in Render)
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER")          # e.g. yourgmail@gmail.com
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")  # Gmail App Password (NOT your normal password)
+
+FROM_EMAIL = os.getenv("FROM_EMAIL")        # usually same as SMTP_USER
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
 
 warnings.filterwarnings("ignore", message="Unverified HTTPS request")
 
-sg_client = SendGridAPIClient(SENDGRID_API_KEY)
-
 # ================== FastAPI Setup ==================
 app = FastAPI(title="Luminous Candles API", version="1.0.0")
+
+# Fail fast if misconfigured (recommended)
+@app.on_event("startup")
+def validate_email_config():
+    missing = []
+    for k in ["SMTP_USER", "SMTP_PASSWORD", "FROM_EMAIL", "ADMIN_EMAIL"]:
+        if not os.getenv(k):
+            missing.append(k)
+    if missing:
+        raise RuntimeError(f"Missing email env vars: {', '.join(missing)}")
 
 app.add_middleware(
     CORSMiddleware,
@@ -168,33 +184,58 @@ def create_payment_link(items: List[Item], customer: CustomerInfo, total: float,
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# ----------------- Email Utility -----------------
-def send_email(to_email: str, subject: str, html_content: str, attachments: list[str] = None):
-    message = Mail(
-        from_email=FROM_EMAIL,
-        to_emails=to_email,
-        subject=subject,
-        html_content=html_content,
-    )
-
-    if attachments:
-        for filepath in attachments:
-            try:
-                with open(filepath, "rb") as f:
-                    encoded = base64.b64encode(f.read()).decode()
-                    message.attachment = Attachment(
-                        FileContent(encoded),
-                        FileName(os.path.basename(filepath)),
-                        FileType("application/pdf"),
-                        Disposition("attachment"),
-                    )
-            except Exception as e:
-                print(f"[WARN] Could not attach file {filepath}: {e}")
-
+# ----------------- Email Utility (Google SMTP) -----------------
+def send_email(to_email: str, subject: str, html_content: str, attachments: list[str] = None) -> bool:
+    """
+    Sends HTML email via Gmail SMTP and supports PDF (and other) attachments.
+    Requirements:
+      - SMTP_USER: yourgmail@gmail.com
+      - SMTP_PASSWORD: Gmail App Password (NOT normal password)
+      - FROM_EMAIL: usually same as SMTP_USER
+    """
     try:
-        response = sg_client.send(message)
-        print(f"[OK] Email sent to {to_email}, Status: {response.status_code}")
+        if not all([SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD, FROM_EMAIL]):
+            print("[ERROR] SMTP config missing. Check SMTP_HOST/PORT/USER/PASSWORD and FROM_EMAIL.")
+            return False
+
+        msg = EmailMessage()
+        msg["From"] = FROM_EMAIL
+        msg["To"] = to_email
+        msg["Subject"] = subject
+
+        # plain fallback + HTML body
+        msg.set_content("This email requires HTML support.")
+        msg.add_alternative(html_content, subtype="html")
+
+        # Attach files (PDF labels etc.)
+        if attachments:
+            for filepath in attachments:
+                try:
+                    if not filepath or not os.path.exists(filepath):
+                        print(f"[WARN] Attachment not found: {filepath}")
+                        continue
+                    with open(filepath, "rb") as f:
+                        file_data = f.read()
+
+                    # If you only attach PDFs, this is fine. If you add other file types later,
+                    # you can detect mimetype with `mimetypes`.
+                    msg.add_attachment(
+                        file_data,
+                        maintype="application",
+                        subtype="pdf",
+                        filename=os.path.basename(filepath),
+                    )
+                except Exception as e:
+                    print(f"[WARN] Could not attach file {filepath}: {e}")
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASSWORD)
+            server.send_message(msg)
+
+        print(f"[OK] Email sent to {to_email}")
         return True
+
     except Exception as e:
         print(f"[ERROR] Email failed to {to_email}: {e}")
         return False
@@ -280,7 +321,7 @@ def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
 
         # TO section
         c.setFont("Helvetica-Bold", 11)
-        y_to_start = y_top - logo_h - 20 * mm  
+        y_to_start = y_top - logo_h - 20 * mm
         c.drawString(side_margin, y_to_start, "TO:")
 
         c.setFont("Helvetica-Bold", 14)
@@ -292,8 +333,6 @@ def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
             customer.get("country", "GB"),
         ]
 
-        # Compute vertical space for TO block
-        total_text_height = len(to_lines) * line_gap
         start_y = y_to_start - 4 * mm  # small gap after "TO:"
         for i, text in enumerate(to_lines):
             c.drawCentredString(width / 2, start_y - (i * line_gap), text)
@@ -314,7 +353,6 @@ def generate_local_label(order: dict, customer: dict, order_id: str) -> str:
         print(f"[ERROR] Failed to generate label: {e}")
         return None
 
-
 # ----------------- Checkout API -----------------
 @app.post("/create-checkout-session")
 async def create_checkout_session(request: CheckoutRequest):
@@ -323,6 +361,7 @@ async def create_checkout_session(request: CheckoutRequest):
         subtotal = sum(item.price * item.qty for item in request.cart)
         if subtotal < 0.5:
             raise HTTPException(status_code=400, detail="Order total must be at least £0.50")
+
         tax_rate = get_tax_rate_by_state(request.customer.state)
         tax = round(subtotal * tax_rate, 2)
         shipping = 5.99 if subtotal <= 50 else 0.0
@@ -376,8 +415,21 @@ async def payment_success(req: SuccessRequest):
        <b>Total: £{order['total']:.2f}</b></p>
     """
 
-    send_email(req.client_email, "Your Order Confirmation", html)
+    # Send customer confirmation email
+    ok_customer = send_email(req.client_email, "Your Order Confirmation", html)
+
+    # Generate and send admin email with label attachment
     label = generate_local_label(order, req.customer.dict(), req.checkoutId)
-    send_email(ADMIN_EMAIL, f"New Order ({req.checkoutId})", html, [label] if label else None)
+    ok_admin = send_email(ADMIN_EMAIL, f"New Order ({req.checkoutId})", html, [label] if label else None)
+
+    # Optional: cleanup temp label file
+    if label and os.path.exists(label):
+        try:
+            os.remove(label)
+        except Exception:
+            pass
+
+    if not ok_customer or not ok_admin:
+        raise HTTPException(status_code=500, detail="Order confirmed, but email sending failed")
 
     return {"status": "success", "message": "Order confirmed and emails sent"}
