@@ -2,24 +2,36 @@ services:
   - type: web
     name: luminous-candles-api
     env: python
-    region: oregon  # or choose closest region: frankfurt, singapore, etc.
-    plan: free       # or "starter" / "standard" / "pro" depending on your plan
+    region: oregon
+    plan: free
+
+    # 🔑 FORCE Python version (this is what was missing)
+    pythonVersion: 3.12.3
 
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
 
     startCommand: |
-      uvicorn main:app --host 0.0.0.0 --port 10000
+      uvicorn main:app --host 0.0.0.0 --port $PORT
 
     envVars:
       - key: ENV
         value: production
+
       - key: STRIPE_SECRET_KEY_TEST
         sync: false
       - key: STRIPE_SECRET_KEY_LIVE
         sync: false
-      - key: SENDGRID_API_KEY
+
+      # SMTP / Email
+      - key: SMTP_HOST
+        value: smtp.gmail.com
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
         sync: false
       - key: FROM_EMAIL
         sync: false
