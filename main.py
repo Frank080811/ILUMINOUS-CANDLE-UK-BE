@@ -14,13 +14,28 @@ import asyncpg
 # ================== ENV ==================
 load_dotenv()
 
-FRONTEND_URL = os.getenv("FRONTEND_URL")
+FRONTEND_URL = normalize_frontend_url(os.getenv("FRONTEND_URL"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 FROM_EMAIL = os.getenv("FROM_EMAIL")
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY_TEST")
+
+# ================== NORMILIZE FRONTEND ==================
+def normalize_frontend_url(url: str | None) -> str:
+    if not url or not url.strip():
+        raise RuntimeError("FRONTEND_URL is not set")
+
+    url = url.strip()
+
+    # If someone set "example.com" or "www.example.com", make it https://example.com
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    # Avoid trailing slash causing double slashes later
+    return url.rstrip("/")
+
 
 # ================== APP ==================
 app = FastAPI(title="Luminous Candles API")
@@ -193,9 +208,11 @@ async def payment_success(req: SuccessRequest):
     if not order:
         raise HTTPException(404, "Order not found")
 
-    async with db_pool.acquire() as c:
-        await c.execute("""
-        INSERT INTO orders VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+    await c.execute("""
+        INSERT INTO orders (
+            id, customer_name, email, phone, address, city, state, zip, country,
+            subtotal, tax, shipping, total
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
         """,
         uuid.UUID(req.checkoutId),
         order["customer"]["fullName"],
@@ -209,8 +226,8 @@ async def payment_success(req: SuccessRequest):
         order["subtotal"],
         order["tax"],
         order["shipping"],
-        order["total"]
-        )
+        order["total"],
+        )   
 
         for i in order["cart"]:
             await c.execute("""
