@@ -1,6 +1,5 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, conint, confloat, EmailStr
 import uuid, os
 from typing import List
@@ -14,6 +13,16 @@ import asyncpg
 # ================== ENV ==================
 load_dotenv()
 
+def normalize_frontend_url(url: str | None) -> str:
+    if not url or not url.strip():
+        raise RuntimeError("FRONTEND_URL is not set")
+
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    return url.rstrip("/")
+
 FRONTEND_URL = normalize_frontend_url(os.getenv("FRONTEND_URL"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 SMTP_USER = os.getenv("SMTP_USER")
@@ -21,21 +30,6 @@ SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 FROM_EMAIL = os.getenv("FROM_EMAIL")
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY_TEST")
-
-# ================== NORMILIZE FRONTEND ==================
-def normalize_frontend_url(url: str | None) -> str:
-    if not url or not url.strip():
-        raise RuntimeError("FRONTEND_URL is not set")
-
-    url = url.strip()
-
-    # If someone set "example.com" or "www.example.com", make it https://example.com
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
-
-    # Avoid trailing slash causing double slashes later
-    return url.rstrip("/")
-
 
 # ================== APP ==================
 app = FastAPI(title="Luminous Candles API")
@@ -111,6 +105,7 @@ class SuccessRequest(BaseModel):
 # ================== TEMP STORE ==================
 ORDERS_DB: dict[str, dict] = {}
 
+
 # ================== TAX HELPER (YOUR ORIGINAL LOGIC) ==================
 def get_tax_rate_by_state(state: str) -> float:
     tax_rates = {
@@ -143,23 +138,20 @@ def send_email(to_email: str, html: str):
 @app.post("/create-checkout-session")
 async def create_checkout(req: CheckoutRequest):
     subtotal = sum(i.price * i.qty for i in req.cart)
-    tax_rate = get_tax_rate_by_state(req.customer.state)
-    tax = round(subtotal * tax_rate, 2)
+    tax = round(subtotal * get_tax_rate_by_state(req.customer.state), 2)
     shipping = 5.99 if subtotal <= 50 else 0.0
     total = round(subtotal + tax + shipping, 2)
 
     checkout_id = str(uuid.uuid4())
 
-    line_items = [
-        {
-            "price_data": {
-                "currency": "gbp",
-                "product_data": {"name": i.name},
-                "unit_amount": int(i.price * 100),
-            },
-            "quantity": i.qty,
-        } for i in req.cart
-    ]
+    line_items = [{
+        "price_data": {
+            "currency": "gbp",
+            "product_data": {"name": i.name},
+            "unit_amount": int(i.price * 100),
+        },
+        "quantity": i.qty,
+    } for i in req.cart]
 
     if tax > 0:
         line_items.append({
@@ -208,7 +200,8 @@ async def payment_success(req: SuccessRequest):
     if not order:
         raise HTTPException(404, "Order not found")
 
-    await c.execute("""
+    async with db_pool.acquire() as c:
+        await c.execute("""
         INSERT INTO orders (
             id, customer_name, email, phone, address, city, state, zip, country,
             subtotal, tax, shipping, total
@@ -227,7 +220,7 @@ async def payment_success(req: SuccessRequest):
         order["tax"],
         order["shipping"],
         order["total"],
-        )   
+        )
 
         for i in order["cart"]:
             await c.execute("""
@@ -245,7 +238,7 @@ async def payment_success(req: SuccessRequest):
 
     return {"status": "success"}
 
-# ================== FETCH ORDER (SUCCESS PAGE) ==================
+# ================== FETCH ORDER ==================
 @app.get("/order/{order_id}")
 async def get_order(order_id: str):
     async with db_pool.acquire() as c:
