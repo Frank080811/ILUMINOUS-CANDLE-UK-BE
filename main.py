@@ -172,7 +172,15 @@ async def create_checkout(req: CheckoutRequest):
 
     async with db_pool.acquire() as c:
         await c.execute("""
-        INSERT INTO orders VALUES ($1,'PENDING',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        INSERT INTO orders (
+            id, status, customer_name, email, phone,
+            address, city, state, zip, country,
+            subtotal, tax, shipping, total, stripe_session_id
+        ) VALUES (
+            $1,'PENDING',$2,$3,$4,
+            $5,$6,$7,$8,$9,
+            $10,$11,$12,$13,$14
+        )
         """,
         order_id,
         req.customer.fullName,
@@ -196,7 +204,10 @@ async def create_checkout(req: CheckoutRequest):
             VALUES ($1,$2,$3,$4)
             """, order_id, i.name, i.price, i.qty)
 
-    return {"url": session.url}
+    return {
+        "url": session.url,
+        "orderId": str(order_id)
+    }
 
 # ================== STRIPE WEBHOOK ==================
 @app.post("/stripe/webhook")
