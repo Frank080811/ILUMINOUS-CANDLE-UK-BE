@@ -4,14 +4,9 @@ email-validator
 python-multipart
 python-dotenv
 aiosmtplib
-email-validator
-sendgrid
-pydantic
-python-dotenv
 uvicorn
 requests
 pydantic
-python-dotenv
 stripe
 sendgrid
 reportlab
