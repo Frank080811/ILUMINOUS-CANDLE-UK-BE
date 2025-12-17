@@ -13,23 +13,28 @@ import asyncpg
 # ================== ENV ==================
 load_dotenv()
 
-def normalize_frontend_url(url: str | None) -> str:
-    if not url or not url.strip():
-        raise RuntimeError("FRONTEND_URL is not set")
-
-    url = url.strip()
-    if not url.startswith(("http://", "https://")):
-        url = "https://" + url
-
-    return url.rstrip("/")
-
-FRONTEND_URL = normalize_frontend_url(os.getenv("FRONTEND_URL"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
 FROM_EMAIL = os.getenv("FROM_EMAIL")
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY_TEST")
+
+# ================== FRONTEND URL HELPER ==================
+def get_frontend_url() -> str:
+    url = os.getenv("FRONTEND_URL")
+
+    if not url or not url.strip():
+        raise HTTPException(
+            status_code=500,
+            detail="FRONTEND_URL environment variable is not configured"
+        )
+
+    url = url.strip()
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+
+    return url.rstrip("/")
 
 # ================== APP ==================
 app = FastAPI(title="Luminous Candles API")
@@ -137,6 +142,8 @@ def send_email(to_email: str, html: str):
 # ================== CHECKOUT ==================
 @app.post("/create-checkout-session")
 async def create_checkout(req: CheckoutRequest):
+    frontend_url = get_frontend_url()  # SAFE: evaluated only when endpoint is called
+
     subtotal = sum(i.price * i.qty for i in req.cart)
     tax = round(subtotal * get_tax_rate_by_state(req.customer.state), 2)
     shipping = 5.99 if subtotal <= 50 else 0.0
@@ -177,8 +184,8 @@ async def create_checkout(req: CheckoutRequest):
         mode="payment",
         payment_method_types=["card"],
         line_items=line_items,
-        success_url=f"{FRONTEND_URL}/success.html?checkoutId={checkout_id}",
-        cancel_url=f"{FRONTEND_URL}/cancel.html",
+        success_url=f"{frontend_url}/success.html?checkoutId={checkout_id}",
+        cancel_url=f"{frontend_url}/cancel.html",
         customer_email=req.customer.email,
     )
 
