@@ -17,9 +17,14 @@ from reportlab.lib.pagesizes import A6, landscape
 from reportlab.lib.units import mm
 from reportlab.graphics.barcode import qr
 from reportlab.graphics import renderPDF
+from reportlab.graphics.shapes import Drawing
 
 from PyPDF2 import PdfMerger
 import io, tempfile
+
+
+
+
 
 # ================== LOGGING ==================
 class RequestIdFilter(logging.Filter):
@@ -263,56 +268,88 @@ async def stripe_webhook(request: Request):
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
 
-    event = stripe.Webhook.construct_event(
-        payload, sig_header, STRIPE_WEBHOOK_SECRET
-    )
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET
+        )
+    except Exception as e:
+        # Invalid signature or payload
+        raise HTTPException(status_code=400, detail=str(e))
 
-    if event["type"] == "checkout.session.completed":
-        session = event["data"]["object"]
-        order_id = uuid.UUID(session["metadata"]["order_id"])
+    # We only care about successful checkout completion
+    if event["type"] != "checkout.session.completed":
+        return {"status": "ignored"}
 
-        async with db_pool.acquire() as c:
-            order = await c.fetchrow(
-                "SELECT * FROM orders WHERE id=$1",
+    session = event["data"]["object"]
+
+    # Safety check
+    if "metadata" not in session or "order_id" not in session["metadata"]:
+        raise HTTPException(status_code=400, detail="Missing order_id metadata")
+
+    order_id = uuid.UUID(session["metadata"]["order_id"])
+
+    async with db_pool.acquire() as c:
+        # Fetch order
+        order = await c.fetchrow(
+            "SELECT * FROM orders WHERE id=$1",
+            order_id
+        )
+
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        # If already processed, exit safely (Stripe retries webhooks)
+        if order["status"] == "PAID":
+            return {"status": "already_processed"}
+
+        # 1️⃣ Mark order as PAID
+        await c.execute(
+            "UPDATE orders SET status='PAID' WHERE id=$1",
+            order_id
+        )
+
+        # 2️⃣ Check if label already exists (idempotency)
+        label_exists = await c.fetchrow(
+            "SELECT 1 FROM shipping_labels WHERE order_id=$1",
+            order_id
+        )
+
+        if not label_exists:
+            # Generate QR label PDF
+            label_pdf = generate_local_label(
+                dict(order),
+                {
+                    "fullName": order["customer_name"],
+                    "address": order["address"],
+                    "city": order["city"],
+                    "state": order["state"],
+                    "zip": order["zip"],
+                    "country": order["country"],
+                },
+                str(order_id),
+            )
+
+            # Store label in DB
+            await c.execute(
+                """
+                INSERT INTO shipping_labels (id, order_id, label_pdf)
+                VALUES ($1, $2, $3)
+                """,
+                uuid.uuid4(),
+                order_id,
+                label_pdf,
+            )
+
+        # 3️⃣ Send confirmation email (only once)
+        if not order["email_sent"]:
+            send_email(order["email"], order["total"])
+            await c.execute(
+                "UPDATE orders SET email_sent=TRUE WHERE id=$1",
                 order_id
             )
 
-            if order and order["status"] != "PAID":
-                # 1. Mark order paid
-                await c.execute(
-                    "UPDATE orders SET status='PAID' WHERE id=$1",
-                    order_id
-                )
-
-                # 2. Generate label
-                label_pdf = generate_local_label(
-                    dict(order),
-                    {
-                        "fullName": order["customer_name"],
-                        "address": order["address"],
-                        "city": order["city"],
-                        "state": order["state"],
-                        "zip": order["zip"],
-                        "country": order["country"],
-                    },
-                    str(order_id),
-                )
-
-                # 3. Store label
-                await c.execute(
-                    """
-                    INSERT INTO shipping_labels (id, order_id, label_pdf)
-                    VALUES ($1, $2, $3)
-                    """,
-                    uuid.uuid4(),
-                    order_id,
-                    label_pdf,
-                )
-
-                # 4. Send email
-                send_email(order["email"], order["total"])
-
     return {"status": "ok"}
+
 
 @app.get("/admin/orders/{order_id}/label")
 async def download_label(order_id: str):
@@ -400,26 +437,34 @@ def generate_local_label(order: dict, customer: dict, order_id: str) -> bytes:
     for i, text in enumerate(to_lines):
         c.drawCentredString(width / 2, start_y - (i * line_gap), text)
 
-    # ----------------- QR CODE (BOTTOM-RIGHT) -----------------
+ 
+# ----------------- QR CODE (BOTTOM-RIGHT) -----------------
     qr_size = 26 * mm
     qr_x = width - side_margin - qr_size
     qr_y = bottom_margin
 
-    qr_code = qr.QrCodeWidget(order_id)
-    bounds = qr_code.getBounds()
+    qr_widget = qr.QrCodeWidget(order_id)
+    bounds = qr_widget.getBounds()
+
     qr_width = bounds[2] - bounds[0]
     qr_height = bounds[3] - bounds[1]
 
-    d = qr_code.draw()
-    scale_x = qr_size / qr_width
-    scale_y = qr_size / qr_height
-    d.scale(scale_x, scale_y)
+    drawing = Drawing(
+        qr_size,
+        qr_size,
+        transform=[
+            qr_size / qr_width, 0, 0,
+            qr_size / qr_height, 0, 0
+     ]
+    )
 
-    renderPDF.draw(d, c, qr_x, qr_y)
+    drawing.add(qr_widget)
 
-    # Optional text under QR
+    renderPDF.draw(drawing, c, qr_x, qr_y)
+
     c.setFont("Helvetica", 7)
     c.drawCentredString(qr_x + qr_size / 2, qr_y - 4 * mm, "Order ID")
+
 
     # ----------------- FINALIZE -----------------
     c.showPage()
