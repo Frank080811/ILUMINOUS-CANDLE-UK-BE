@@ -3,12 +3,23 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, conint, confloat, EmailStr
 import uuid, os, logging
 from typing import List
+from fastapi.responses import Response
 
 import stripe
 from dotenv import load_dotenv
 import smtplib
 from email.message import EmailMessage
 import asyncpg
+
+import tempfile, os
+from reportlab.pdfgen import canvas
+from reportlab.lib.pagesizes import A6, landscape
+from reportlab.lib.units import mm
+from reportlab.graphics.barcode import qr
+from reportlab.graphics import renderPDF
+
+from PyPDF2 import PdfMerger
+import io, tempfile
 
 # ================== LOGGING ==================
 class RequestIdFilter(logging.Filter):
@@ -114,20 +125,25 @@ class CheckoutRequest(BaseModel):
     cart: List[Item]
 
 
-# ================== TAX HELPER (YOUR ORIGINAL LOGIC) ==================
+# ================== TAX HELPER  ==================
 def get_tax_rate_by_state(state: str) -> float:
     tax_rates = {
         "Alabama": 0.04, "Alaska": 0.00, "Arizona": 0.056, "Arkansas": 0.065,
-        "California": 0.0725, "Colorado": 0.029, "Connecticut": 0.0635, "Delaware": 0.00,
-        "Florida": 0.06, "Georgia": 0.04, "Hawaii": 0.04, "Idaho": 0.06,
-        "Illinois": 0.0625, "Indiana": 0.07, "Iowa": 0.06, "Kansas": 0.065,
-        "Kentucky": 0.06, "Louisiana": 0.0445, "Maine": 0.055, "Maryland": 0.06,
-        "Massachusetts": 0.0625, "Michigan": 0.06, "Minnesota": 0.06875,
-        "Mississippi": 0.07, "Missouri": 0.04225, "Montana": 0.00,
-        "Nebraska": 0.055, "Nevada": 0.0685, "New Hampshire": 0.00,
-        "New Jersey": 0.06625, "New Mexico": 0.05125, "New York": 0.04
+        "California": 0.0725, "Colorado": 0.029, "Connecticut": 0.0635,
+        "Delaware": 0.00, "Florida": 0.06, "Georgia": 0.04,
+        "Hawaii": 0.04, "Idaho": 0.06, "Illinois": 0.0625,
+        "Indiana": 0.07, "Iowa": 0.06, "Kansas": 0.065,
+        "Kentucky": 0.06, "Louisiana": 0.0445, "Maine": 0.055,
+        "Maryland": 0.06, "Massachusetts": 0.0625,
+        "Michigan": 0.06, "Minnesota": 0.06875,
+        "Mississippi": 0.07, "Missouri": 0.04225,
+        "Montana": 0.00, "Nebraska": 0.055,
+        "Nevada": 0.0685, "New Hampshire": 0.00,
+        "New Jersey": 0.06625, "New Mexico": 0.05125,
+        "New York": 0.04
     }
     return tax_rates.get(state, 0.07)
+
 
 # ================== EMAIL ==================
 def send_email(to_email: str, total: float):
@@ -149,7 +165,8 @@ def send_email(to_email: str, total: float):
 @app.post("/create-checkout-session")
 async def create_checkout(req: CheckoutRequest):
     subtotal = sum(i.price * i.qty for i in req.cart)
-    tax = round(subtotal * get_tax_rate_by_state(req.customer.state), 2)
+    tax = round(subtotal * get_tax_rate_by_state(customer.state), 2)
+
     shipping = 5.99 if subtotal <= 50 else 0.0
     total = round(subtotal + tax + shipping, 2)
 
@@ -243,34 +260,174 @@ async def stripe_webhook(request: Request):
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
 
-    try:
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, STRIPE_WEBHOOK_SECRET
-        )
-    except Exception:
-        raise HTTPException(400, "Invalid webhook")
+    event = stripe.Webhook.construct_event(
+        payload, sig_header, STRIPE_WEBHOOK_SECRET
+    )
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
-        order_id = session["metadata"]["order_id"]
+        order_id = uuid.UUID(session["metadata"]["order_id"])
 
         async with db_pool.acquire() as c:
             order = await c.fetchrow(
-                "SELECT status, email_sent, email, total FROM orders WHERE id=$1",
-                uuid.UUID(order_id)
+                "SELECT * FROM orders WHERE id=$1",
+                order_id
             )
 
             if order and order["status"] != "PAID":
-                await c.execute("""
-                UPDATE orders
-                SET status='PAID', email_sent=TRUE
-                WHERE id=$1
-                """, uuid.UUID(order_id))
+                # 1. Mark order paid
+                await c.execute(
+                    "UPDATE orders SET status='PAID' WHERE id=$1",
+                    order_id
+                )
 
-                if not order["email_sent"]:
-                    send_email(order["email"], order["total"])
+                # 2. Generate label
+                label_pdf = generate_local_label(
+                    dict(order),
+                    {
+                        "fullName": order["customer_name"],
+                        "address": order["address"],
+                        "city": order["city"],
+                        "state": order["state"],
+                        "zip": order["zip"],
+                        "country": order["country"],
+                    },
+                    str(order_id),
+                )
+
+                # 3. Store label
+                await c.execute(
+                    """
+                    INSERT INTO shipping_labels (id, order_id, label_pdf)
+                    VALUES ($1, $2, $3)
+                    """,
+                    uuid.uuid4(),
+                    order_id,
+                    label_pdf,
+                )
+
+                # 4. Send email
+                send_email(order["email"], order["total"])
 
     return {"status": "ok"}
+
+@app.get("/admin/orders/{order_id}/label")
+async def download_label(order_id: str):
+    async with db_pool.acquire() as c:
+        label = await c.fetchrow(
+            """
+            SELECT label_pdf
+            FROM shipping_labels
+            WHERE order_id=$1
+            """,
+            uuid.UUID(order_id)
+        )
+
+        if not label:
+            raise HTTPException(404, "Label not found")
+
+    return Response(
+        content=label["label_pdf"],
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"inline; filename=label-{order_id}.pdf"
+        },
+    )
+# ----------------- GENERATE LABEL -----------------
+def generate_local_label(order: dict, customer: dict, order_id: str) -> bytes:
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+    c = canvas.Canvas(tmp.name, pagesize=landscape(A6))
+    width, height = landscape(A6)
+
+    # ----------------- MARGINS -----------------
+    top_margin = 8 * mm
+    side_margin = 8 * mm
+    bottom_margin = 10 * mm
+
+    # ----------------- LOGO -----------------
+    logo_path = "images/LOGON.jpg"
+    logo_w, logo_h = 22 * mm, 22 * mm
+    y_top = height - top_margin
+
+    if os.path.exists(logo_path):
+        c.drawImage(
+            logo_path,
+            side_margin,
+            y_top - logo_h,
+            width=logo_w,
+            height=logo_h,
+            preserveAspectRatio=True,
+            mask="auto",
+        )
+
+    # ----------------- FROM SECTION -----------------
+    from_x = side_margin + logo_w + 6 * mm
+    from_y = y_top - 5 * mm
+
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(from_x, from_y, "FROM:")
+
+    c.setFont("Helvetica", 8)
+    sender_lines = [
+        "Luminous Candles Ltd T/A Nelux Candles",
+        "71–75 Shelton Street",
+        "Covent Garden, London WC2H 9JQ",
+        "United Kingdom",
+    ]
+
+    for i, line in enumerate(sender_lines):
+        c.drawString(from_x, from_y - ((i + 1) * 4.5 * mm), line)
+
+    # ----------------- TO SECTION -----------------
+    to_block_top = y_top - logo_h - 18 * mm
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(side_margin, to_block_top, "TO:")
+
+    c.setFont("Helvetica-Bold", 13)
+    line_gap = 6 * mm
+
+    to_lines = [
+        customer.get("fullName", ""),
+        customer.get("address", ""),
+        f"{customer.get('city', '')}, {customer.get('state', '')} {customer.get('zip', '')}",
+        customer.get("country", "GB"),
+    ]
+
+    start_y = to_block_top - 6 * mm
+    for i, text in enumerate(to_lines):
+        c.drawCentredString(width / 2, start_y - (i * line_gap), text)
+
+    # ----------------- QR CODE (BOTTOM-RIGHT) -----------------
+    qr_size = 26 * mm
+    qr_x = width - side_margin - qr_size
+    qr_y = bottom_margin
+
+    qr_code = qr.QrCodeWidget(order_id)
+    bounds = qr_code.getBounds()
+    qr_width = bounds[2] - bounds[0]
+    qr_height = bounds[3] - bounds[1]
+
+    d = qr_code.draw()
+    scale_x = qr_size / qr_width
+    scale_y = qr_size / qr_height
+    d.scale(scale_x, scale_y)
+
+    renderPDF.draw(d, c, qr_x, qr_y)
+
+    # Optional text under QR
+    c.setFont("Helvetica", 7)
+    c.drawCentredString(qr_x + qr_size / 2, qr_y - 4 * mm, "Order ID")
+
+    # ----------------- FINALIZE -----------------
+    c.showPage()
+    c.save()
+
+    with open(tmp.name, "rb") as f:
+        pdf_bytes = f.read()
+
+    os.unlink(tmp.name)
+    return pdf_bytes
+
 
 # ================== FETCH ORDER ==================
 @app.get("/order/{order_id}")
@@ -289,3 +446,56 @@ async def get_order(order_id: str):
         )
 
     return {"order": dict(order), "items": [dict(i) for i in items]}
+
+# ================== SINGLE LABEL DOWNLOAD ==================
+@app.get("/admin/orders/{order_id}/label")
+async def download_label(order_id: str):
+    async with db_pool.acquire() as c:
+        label = await c.fetchrow(
+            """
+            SELECT label_pdf
+            FROM shipping_labels
+            WHERE order_id=$1
+            """,
+            uuid.UUID(order_id)
+        )
+
+        if not label:
+            raise HTTPException(404, "Label not found")
+
+    return Response(
+        content=label["label_pdf"],
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f"inline; filename=label-{order_id}.pdf"
+        },
+    )
+
+
+
+
+@app.post("/admin/labels/batch")
+async def batch_print_labels(order_ids: list[str]):
+    merger = PdfMerger()
+
+    async with db_pool.acquire() as c:
+        for oid in order_ids:
+            row = await c.fetchrow(
+                "SELECT label_pdf FROM shipping_labels WHERE order_id=$1",
+                uuid.UUID(oid)
+            )
+            if row:
+                merger.append(io.BytesIO(row["label_pdf"]))
+
+    output = io.BytesIO()
+    merger.write(output)
+    merger.close()
+    output.seek(0)
+
+    return Response(
+        content=output.read(),
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": "inline; filename=batch-labels.pdf"
+        },
+    )
