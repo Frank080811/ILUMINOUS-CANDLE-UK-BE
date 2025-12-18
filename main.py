@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, conint, confloat, EmailStr
-import uuid, os, logging, json
+import uuid, os, logging
 from typing import List
 
 import stripe
@@ -10,7 +10,7 @@ import smtplib
 from email.message import EmailMessage
 import asyncpg
 
-# ================== LOGGING WITH REQUEST ID ==================
+# ================== LOGGING ==================
 class RequestIdFilter(logging.Filter):
     def filter(self, record):
         record.request_id = getattr(record, "request_id", "-")
@@ -48,10 +48,8 @@ app.add_middleware(
 
 @app.middleware("http")
 async def request_id_middleware(request: Request, call_next):
-    request_id = str(uuid.uuid4())
-    logging.LoggerAdapter(logger, {"request_id": request_id})
     response = await call_next(request)
-    response.headers["X-Request-ID"] = request_id
+    response.headers["X-Request-ID"] = str(uuid.uuid4())
     return response
 
 # ================== DB ==================
@@ -80,6 +78,7 @@ async def startup():
             shipping NUMERIC,
             total NUMERIC,
             stripe_session_id TEXT,
+            email_sent BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT NOW()
         );
         """)
@@ -114,6 +113,7 @@ class CheckoutRequest(BaseModel):
     customer: CustomerInfo
     cart: List[Item]
 
+
 # ================== TAX HELPER (YOUR ORIGINAL LOGIC) ==================
 def get_tax_rate_by_state(state: str) -> float:
     tax_rates = {
@@ -129,14 +129,16 @@ def get_tax_rate_by_state(state: str) -> float:
     }
     return tax_rates.get(state, 0.07)
 
-
 # ================== EMAIL ==================
 def send_email(to_email: str, total: float):
     msg = EmailMessage()
     msg["From"] = FROM_EMAIL
     msg["To"] = to_email
     msg["Subject"] = "Order Confirmed"
-    msg.set_content(f"Thank you for your order. Total: £{total}")
+    msg.set_content(
+        f"Thank you for your order.\n"
+        f"Total paid: £{total}"
+    )
 
     with smtplib.SMTP("smtp.gmail.com", 587) as s:
         s.starttls()
@@ -153,21 +155,50 @@ async def create_checkout(req: CheckoutRequest):
 
     order_id = uuid.uuid4()
 
-    line_items = [{
-        "price_data": {
-            "currency": "usd",
-            "product_data": {"name": i.name},
-            "unit_amount": int(i.price * 100),
-        },
-        "quantity": i.qty,
-    } for i in req.cart]
+    # ---------- STRIPE LINE ITEMS ----------
+    line_items = []
 
+    # Products
+    for i in req.cart:
+        line_items.append({
+            "price_data": {
+                "currency": "usd",
+                "product_data": {"name": i.name},
+                "unit_amount": int(i.price * 100),
+            },
+            "quantity": i.qty,
+        })
+
+    # Tax (separate)
+    if tax > 0:
+        line_items.append({
+            "price_data": {
+                "currency": "usd",
+                "product_data": {"name": "Sales Tax"},
+                "unit_amount": int(tax * 100),
+            },
+            "quantity": 1,
+        })
+
+    # Shipping (separate)
+    if shipping > 0:
+        line_items.append({
+            "price_data": {
+                "currency": "usd",
+                "product_data": {"name": "Shipping"},
+                "unit_amount": int(shipping * 100),
+            },
+            "quantity": 1,
+        })
+
+    # ---------- STRIPE SESSION ----------
     session = stripe.checkout.Session.create(
         mode="payment",
         line_items=line_items,
         success_url=f"{FRONTEND_URL}/success.html",
         cancel_url=f"{FRONTEND_URL}/cancel.html",
         customer_email=req.customer.email,
+        metadata={"order_id": str(order_id)},
     )
 
     async with db_pool.acquire() as c:
@@ -204,10 +235,7 @@ async def create_checkout(req: CheckoutRequest):
             VALUES ($1,$2,$3,$4)
             """, order_id, i.name, i.price, i.qty)
 
-    return {
-        "url": session.url,
-        "orderId": str(order_id)
-    }
+    return {"url": session.url, "orderId": str(order_id)}
 
 # ================== STRIPE WEBHOOK ==================
 @app.post("/stripe/webhook")
@@ -224,19 +252,23 @@ async def stripe_webhook(request: Request):
 
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
+        order_id = session["metadata"]["order_id"]
 
         async with db_pool.acquire() as c:
             order = await c.fetchrow(
-                "SELECT id,email,total FROM orders WHERE stripe_session_id=$1",
-                session["id"]
+                "SELECT status, email_sent, email, total FROM orders WHERE id=$1",
+                uuid.UUID(order_id)
             )
 
-            if order:
-                await c.execute(
-                    "UPDATE orders SET status='PAID' WHERE id=$1",
-                    order["id"]
-                )
-                send_email(order["email"], order["total"])
+            if order and order["status"] != "PAID":
+                await c.execute("""
+                UPDATE orders
+                SET status='PAID', email_sent=TRUE
+                WHERE id=$1
+                """, uuid.UUID(order_id))
+
+                if not order["email_sent"]:
+                    send_email(order["email"], order["total"])
 
     return {"status": "ok"}
 
