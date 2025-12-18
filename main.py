@@ -165,7 +165,10 @@ def send_email(to_email: str, total: float):
 @app.post("/create-checkout-session")
 async def create_checkout(req: CheckoutRequest):
     subtotal = sum(i.price * i.qty for i in req.cart)
-    tax = round(subtotal * get_tax_rate_by_state(customer.state), 2)
+    tax = round(
+        subtotal * get_tax_rate_by_state(req.customer.state),
+        2
+        )
 
     shipping = 5.99 if subtotal <= 50 else 0.0
     total = round(subtotal + tax + shipping, 2)
@@ -471,6 +474,28 @@ async def download_label(order_id: str):
         },
     )
 
+@app.get("/admin/orders")
+async def get_all_orders():
+    async with db_pool.acquire() as c:
+        orders = await c.fetch("""
+            SELECT *
+            FROM orders
+            ORDER BY created_at DESC
+        """)
+
+        result = []
+        for o in orders:
+            items = await c.fetch("""
+                SELECT product_name, quantity
+                FROM order_items
+                WHERE order_id=$1
+            """, o["id"])
+
+            order_dict = dict(o)
+            order_dict["items"] = [dict(i) for i in items]
+            result.append(order_dict)
+
+    return result
 
 
 
