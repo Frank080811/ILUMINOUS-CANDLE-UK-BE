@@ -150,16 +150,58 @@ def get_tax_rate_by_state(state: str) -> float:
     return tax_rates.get(state, 0.07)
 
 
-# ================== EMAIL ==================
-def send_email(to_email: str, total: float):
+def send_order_confirmation_email(
+    to_email: str,
+    order: dict,
+    items: list[dict]
+):
     msg = EmailMessage()
     msg["From"] = FROM_EMAIL
     msg["To"] = to_email
-    msg["Subject"] = "Order Confirmed"
-    msg.set_content(
-        f"Thank you for your order.\n"
-        f"Total paid: £{total}"
-    )
+    msg["Subject"] = f"Order Confirmation – {order['id']}"
+
+    item_lines = []
+    for i in items:
+        line_total = float(i["price"]) * i["quantity"]
+        item_lines.append(
+            f"- {i['product_name']} × {i['quantity']}  (£{line_total:.2f})"
+        )
+
+    body = f"""
+Dear {order['customer_name']},
+
+Thank you for shopping with Luminous Candles.
+
+Your order has been successfully confirmed. Below are your order details:
+
+Order ID:
+{order['id']}
+
+Items Ordered:
+{chr(10).join(item_lines)}
+
+Order Summary:
+Subtotal: £{float(order['subtotal']):.2f}
+Tax: £{float(order['tax']):.2f}
+Shipping: £{float(order['shipping']):.2f}
+-----------------------------
+Total Paid: £{float(order['total']):.2f}
+
+Shipping Address:
+{order['customer_name']}
+{order['address']}
+{order['city']}, {order['state']} {order['zip']}
+{order['country']}
+
+Your order is now being prepared for shipment.
+
+If you have any questions, please contact us at support@luminouscandles.co.uk.
+
+Warm regards,
+Luminous Candles Team
+"""
+
+    msg.set_content(body)
 
     with smtplib.SMTP("smtp.gmail.com", 587) as s:
         s.starttls()
@@ -263,6 +305,7 @@ async def create_checkout(req: CheckoutRequest):
     return {"url": session.url, "orderId": str(order_id)}
 
 # ================== STRIPE WEBHOOK ==================
+# ================== STRIPE WEBHOOK ==================
 @app.post("/stripe/webhook")
 async def stripe_webhook(request: Request):
     payload = await request.body()
@@ -273,49 +316,43 @@ async def stripe_webhook(request: Request):
             payload, sig_header, STRIPE_WEBHOOK_SECRET
         )
     except Exception as e:
-        # Invalid signature or payload
         raise HTTPException(status_code=400, detail=str(e))
 
-    # We only care about successful checkout completion
     if event["type"] != "checkout.session.completed":
         return {"status": "ignored"}
 
     session = event["data"]["object"]
 
-    # Safety check
-    if "metadata" not in session or "order_id" not in session["metadata"]:
-        raise HTTPException(status_code=400, detail="Missing order_id metadata")
+    if "order_id" not in session.get("metadata", {}):
+        raise HTTPException(400, "Missing order_id metadata")
 
     order_id = uuid.UUID(session["metadata"]["order_id"])
 
     async with db_pool.acquire() as c:
-        # Fetch order
         order = await c.fetchrow(
             "SELECT * FROM orders WHERE id=$1",
             order_id
         )
 
         if not order:
-            raise HTTPException(status_code=404, detail="Order not found")
+            raise HTTPException(404, "Order not found")
 
-        # If already processed, exit safely (Stripe retries webhooks)
         if order["status"] == "PAID":
             return {"status": "already_processed"}
 
-        # 1️⃣ Mark order as PAID
+        # 1️⃣ Mark as PAID
         await c.execute(
             "UPDATE orders SET status='PAID' WHERE id=$1",
             order_id
         )
 
-        # 2️⃣ Check if label already exists (idempotency)
+        # 2️⃣ Generate label (idempotent)
         label_exists = await c.fetchrow(
             "SELECT 1 FROM shipping_labels WHERE order_id=$1",
             order_id
         )
 
         if not label_exists:
-            # Generate QR label PDF
             label_pdf = generate_local_label(
                 dict(order),
                 {
@@ -329,7 +366,6 @@ async def stripe_webhook(request: Request):
                 str(order_id),
             )
 
-            # Store label in DB
             await c.execute(
                 """
                 INSERT INTO shipping_labels (id, order_id, label_pdf)
@@ -340,16 +376,30 @@ async def stripe_webhook(request: Request):
                 label_pdf,
             )
 
-        # 3️⃣ Send confirmation email (only once)
+        # 3️⃣ Fetch items for email
+        items = await c.fetch(
+            """
+            SELECT product_name, price, quantity
+            FROM order_items
+            WHERE order_id=$1
+            """,
+            order_id
+        )
+
+        # 4️⃣ Send professional confirmation email (once)
         if not order["email_sent"]:
-            send_email(order["email"], order["total"])
+            send_order_confirmation_email(
+                order["email"],
+                dict(order),
+                [dict(i) for i in items],
+            )
+
             await c.execute(
                 "UPDATE orders SET email_sent=TRUE WHERE id=$1",
                 order_id
             )
 
     return {"status": "ok"}
-
 
 @app.get("/admin/orders/{order_id}/label")
 async def download_label(order_id: str):
