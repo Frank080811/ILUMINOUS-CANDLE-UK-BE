@@ -261,7 +261,7 @@ async def create_checkout(req: CheckoutRequest):
     session = stripe.checkout.Session.create(
         mode="payment",
         line_items=line_items,
-        success_url=f"{FRONTEND_URL}/success.html",
+        success_url=f"{FRONTEND_URL}/success.html?order_id={order_id}",
         cancel_url=f"{FRONTEND_URL}/cancel.html",
         customer_email=req.customer.email,
         metadata={"order_id": str(order_id)},
