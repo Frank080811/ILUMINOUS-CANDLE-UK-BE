@@ -125,30 +125,16 @@ class CustomerInfo(BaseModel):
     zip: str
     country: str
 
+class CheckoutTotals(BaseModel):
+    subtotal: confloat(ge=0)
+    tax: confloat(ge=0)
+    shipping: confloat(ge=0)
+    total: confloat(ge=0)
+
 class CheckoutRequest(BaseModel):
     customer: CustomerInfo
     cart: List[Item]
-
-
-# ================== TAX HELPER  ==================
-def get_tax_rate_by_state(state: str) -> float:
-    tax_rates = {
-        "Alabama": 0.04, "Alaska": 0.00, "Arizona": 0.056, "Arkansas": 0.065,
-        "California": 0.0725, "Colorado": 0.029, "Connecticut": 0.0635,
-        "Delaware": 0.00, "Florida": 0.06, "Georgia": 0.04,
-        "Hawaii": 0.04, "Idaho": 0.06, "Illinois": 0.0625,
-        "Indiana": 0.07, "Iowa": 0.06, "Kansas": 0.065,
-        "Kentucky": 0.06, "Louisiana": 0.0445, "Maine": 0.055,
-        "Maryland": 0.06, "Massachusetts": 0.0625,
-        "Michigan": 0.06, "Minnesota": 0.06875,
-        "Mississippi": 0.07, "Missouri": 0.04225,
-        "Montana": 0.00, "Nebraska": 0.055,
-        "Nevada": 0.0685, "New Hampshire": 0.00,
-        "New Jersey": 0.06625, "New Mexico": 0.05125,
-        "New York": 0.04
-    }
-    return tax_rates.get(state, 0.07)
-
+    totals: CheckoutTotals
 
 def send_order_confirmation_email(
     to_email: str,
@@ -211,18 +197,31 @@ Luminous Candles Team
 # ================== CHECKOUT ==================
 @app.post("/create-checkout-session")
 async def create_checkout(req: CheckoutRequest):
-    subtotal = sum(i.price * i.qty for i in req.cart)
-    tax = round(
-        subtotal * get_tax_rate_by_state(req.customer.state),
-        2
+
+    # ---------------- FRONTEND-CALCULATED VALUES ----------------
+    subtotal = round(req.totals.subtotal, 2)
+    tax = round(req.totals.tax, 2)
+    shipping = round(req.totals.shipping, 2)
+    total = round(req.totals.total, 2)
+
+    # ---------------- OPTIONAL SAFETY CHECK ----------------
+    computed_subtotal = sum(i.price * i.qty for i in req.cart)
+
+    if round(computed_subtotal, 2) != subtotal:
+        raise HTTPException(
+            status_code=400,
+            detail="Subtotal mismatch between cart and totals"
         )
 
-    shipping = 5.99 if subtotal <= 50 else 0.0
-    total = round(subtotal + tax + shipping, 2)
+    if round(subtotal + tax + shipping, 2) != total:
+        raise HTTPException(
+            status_code=400,
+            detail="Total mismatch"
+        )
 
     order_id = uuid.uuid4()
 
-    # ---------- STRIPE LINE ITEMS ----------
+    # ---------------- STRIPE LINE ITEMS ----------------
     line_items = []
 
     # Products
@@ -236,7 +235,7 @@ async def create_checkout(req: CheckoutRequest):
             "quantity": i.qty,
         })
 
-    # Tax (separate)
+    # Tax (frontend-calculated)
     if tax > 0:
         line_items.append({
             "price_data": {
@@ -247,7 +246,7 @@ async def create_checkout(req: CheckoutRequest):
             "quantity": 1,
         })
 
-    # Shipping (separate)
+    # Shipping (frontend-calculated)
     if shipping > 0:
         line_items.append({
             "price_data": {
@@ -258,7 +257,7 @@ async def create_checkout(req: CheckoutRequest):
             "quantity": 1,
         })
 
-    # ---------- STRIPE SESSION ----------
+    # ---------------- STRIPE SESSION ----------------
     session = stripe.checkout.Session.create(
         mode="payment",
         line_items=line_items,
@@ -268,6 +267,7 @@ async def create_checkout(req: CheckoutRequest):
         metadata={"order_id": str(order_id)},
     )
 
+    # ---------------- DATABASE ----------------
     async with db_pool.acquire() as c:
         await c.execute("""
         INSERT INTO orders (
@@ -302,9 +302,11 @@ async def create_checkout(req: CheckoutRequest):
             VALUES ($1,$2,$3,$4)
             """, order_id, i.name, i.price, i.qty)
 
-    return {"url": session.url, "orderId": str(order_id)}
+    return {
+        "url": session.url,
+        "orderId": str(order_id)
+    }
 
-# ================== STRIPE WEBHOOK ==================
 # ================== STRIPE WEBHOOK ==================
 @app.post("/stripe/webhook")
 async def stripe_webhook(request: Request):
