@@ -295,11 +295,34 @@ async def create_checkout(req: CheckoutRequest):
         metadata={"order_id": str(order_id)},
     )
 
-    async with db_pool.acquire() as c:
-        await c.execute("""
-        INSERT INTO orders VALUES (
-            $1,'PENDING',$2,$3,$4,$5,$6,$7,$8,$9,
-            $10,$11,$12,$13,$14,FALSE,NOW()
+async with db_pool.acquire() as c:
+
+    # ---------------- INSERT ORDER ----------------
+    await c.execute(
+        """
+        INSERT INTO orders (
+            id,
+            status,
+            customer_name,
+            email,
+            phone,
+            address,
+            city,
+            state,
+            zip,
+            country,
+            subtotal,
+            tax,
+            shipping,
+            total,
+            stripe_session_id,
+            email_sent,
+            created_at
+        ) VALUES (
+            $1, 'PENDING', $2, $3, $4,
+            $5, $6, $7, $8, $9,
+            $10, $11, $12, $13,
+            $14, FALSE, NOW()
         )
         """,
         order_id,
@@ -316,15 +339,32 @@ async def create_checkout(req: CheckoutRequest):
         req.totals.shipping,
         req.totals.total,
         session.id
+    )
+
+    # ---------------- INSERT ORDER ITEMS ----------------
+    for item in req.cart:
+        await c.execute(
+            """
+            INSERT INTO order_items (
+                order_id,
+                product_name,
+                price,
+                quantity
+            ) VALUES (
+                $1, $2, $3, $4
+            )
+            """,
+            order_id,
+            item.name,
+            item.price,
+            item.qty
         )
 
-        for i in req.cart:
-            await c.execute("""
-            INSERT INTO order_items (order_id, product_name, price, quantity)
-            VALUES ($1,$2,$3,$4)
-            """, order_id, i.name, i.price, i.qty)
-
-    return {"url": session.url, "orderId": str(order_id)}
+# ---------------- RESPONSE ----------------
+return {
+    "url": session.url,
+    "orderId": str(order_id)
+}
 
 # ================= STRIPE WEBHOOK =================
 @app.post("/stripe/webhook")
