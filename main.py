@@ -444,33 +444,117 @@ async def stripe_webhook(request: Request):
 # ================= LABEL GENERATION =================
 def generate_shipping_label(order: dict) -> bytes:
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+
     c = canvas.Canvas(tmp.name, pagesize=landscape(A6))
     width, height = landscape(A6)
 
+    margin_x = 12 * mm
+    margin_y = 10 * mm
+
+    # ================= LOGO =================
+    logo_path = "images/logon.png"
+    logo_width = 28 * mm
+    logo_height = 28 * mm
+
+    if os.path.exists(logo_path):
+        c.drawImage(
+            logo_path,
+            margin_x,
+            height - margin_y - logo_height,
+            width=logo_width,
+            height=logo_height,
+            preserveAspectRatio=True,
+            mask="auto"
+        )
+
+    # ================= HEADER =================
     c.setFont("Helvetica-Bold", 14)
-    c.drawCentredString(width/2, height-30, "Shipping Label")
+    c.drawCentredString(
+        width / 2,
+        height - margin_y - 6,
+        "Shipping Label"
+    )
+
+    # ================= FROM =================
+    from_x = margin_x + logo_width + 8
+    from_y = height - 30
+
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(from_x, from_y, "FROM:")
+
+    c.setFont("Helvetica", 8)
+    from_lines = [
+        "Luminous Candles Ltd",
+        "71–75 Shelton Street",
+        "Covent Garden",
+        "London WC2H 9JQ",
+        "United Kingdom"
+    ]
+
+    y = from_y - 10
+    for line in from_lines:
+        c.drawString(from_x, y, line)
+        y -= 9
+
+    # ================= TO =================
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(margin_x, height - 95, "TO:")
+
+    c.setFont("Helvetica-Bold", 12)
+    to_lines = [
+        order["customer_name"],
+        order["address"],
+        f"{order['city']}, {order['state']} {order['zip']}",
+        order["country"]
+    ]
+
+    y = height - 112
+    for line in to_lines:
+        c.drawString(margin_x, y, line)
+        y -= 14
+
+    # ================= ORDER INFO =================
+    c.setFont("Helvetica", 8)
+    c.drawString(margin_x, 36, f"Order ID: {order['id']}")
+    c.drawString(margin_x, 24, f"Total: £{float(order['total']):.2f}")
+
+    # ================= QR CODE =================
+    qr_size = 32 * mm
+    qr_x = width - margin_x - qr_size
+    qr_y = margin_y + 4
 
     qr_widget = qr.QrCodeWidget(str(order["id"]))
     bounds = qr_widget.getBounds()
 
     d = Drawing(
-        100, 100,
+        qr_size,
+        qr_size,
         transform=[
-            100 / (bounds[2] - bounds[0]), 0, 0,
-            100 / (bounds[3] - bounds[1]), 0, 0
+            qr_size / (bounds[2] - bounds[0]), 0, 0,
+            qr_size / (bounds[3] - bounds[1]), 0, 0
         ]
     )
     d.add(qr_widget)
-    renderPDF.draw(d, c, width-120, 30)
 
+    renderPDF.draw(d, c, qr_x, qr_y)
+
+    c.setFont("Helvetica", 7)
+    c.drawCentredString(
+        qr_x + qr_size / 2,
+        qr_y - 8,
+        "Scan for Order"
+    )
+
+    # ================= FINALIZE =================
     c.showPage()
     c.save()
 
     with open(tmp.name, "rb") as f:
-        pdf = f.read()
+        pdf_bytes = f.read()
 
     os.unlink(tmp.name)
-    return pdf
+    return pdf_bytes
+
 
 # ================== FETCH ORDER (CUSTOMER) ==================
 @app.get("/order/{order_id}")
