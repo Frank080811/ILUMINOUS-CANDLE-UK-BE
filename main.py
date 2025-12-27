@@ -253,9 +253,12 @@ async def admin_login(data: AdminLogin):
 # ================= CHECKOUT =================
 @app.post("/create-checkout-session")
 async def create_checkout(req: CheckoutRequest):
+
     order_id = uuid.uuid4()
 
+    # ---------------- BUILD STRIPE LINE ITEMS ----------------
     line_items = []
+
     for i in req.cart:
         line_items.append({
             "price_data": {
@@ -286,6 +289,7 @@ async def create_checkout(req: CheckoutRequest):
             "quantity": 1,
         })
 
+    # ---------------- CREATE STRIPE SESSION ----------------
     session = stripe.checkout.Session.create(
         mode="payment",
         line_items=line_items,
@@ -295,70 +299,76 @@ async def create_checkout(req: CheckoutRequest):
         metadata={"order_id": str(order_id)},
     )
 
-async with db_pool.acquire() as c:
+    # ---------------- SAVE ORDER TO DATABASE ----------------
+    async with db_pool.acquire() as c:
 
-    # ---------------- INSERT ORDER ----------------
-    await c.execute(
-        """
-        INSERT INTO orders (
-            id,
-            status,
-            customer_name,
-            email,
-            phone,
-            address,
-            city,
-            state,
-            zip,
-            country,
-            subtotal,
-            tax,
-            shipping,
-            total,
-            stripe_session_id,
-            email_sent,
-            created_at
-        ) VALUES (
-            $1, 'PENDING', $2, $3, $4,
-            $5, $6, $7, $8, $9,
-            $10, $11, $12, $13,
-            $14, FALSE, NOW()
-        )
-        """,
-        order_id,
-        req.customer.fullName,
-        req.customer.email,
-        req.customer.phone,
-        req.customer.address,
-        req.customer.city,
-        req.customer.state,
-        req.customer.zip,
-        req.customer.country,
-        req.totals.subtotal,
-        req.totals.tax,
-        req.totals.shipping,
-        req.totals.total,
-        session.id
-    )
-
-    # ---------------- INSERT ORDER ITEMS ----------------
-    for item in req.cart:
         await c.execute(
             """
-            INSERT INTO order_items (
-                order_id,
-                product_name,
-                price,
-                quantity
+            INSERT INTO orders (
+                id,
+                status,
+                customer_name,
+                email,
+                phone,
+                address,
+                city,
+                state,
+                zip,
+                country,
+                subtotal,
+                tax,
+                shipping,
+                total,
+                stripe_session_id,
+                email_sent,
+                created_at
             ) VALUES (
-                $1, $2, $3, $4
+                $1, 'PENDING', $2, $3, $4,
+                $5, $6, $7, $8, $9,
+                $10, $11, $12, $13,
+                $14, FALSE, NOW()
             )
             """,
             order_id,
-            item.name,
-            item.price,
-            item.qty
+            req.customer.fullName,
+            req.customer.email,
+            req.customer.phone,
+            req.customer.address,
+            req.customer.city,
+            req.customer.state,
+            req.customer.zip,
+            req.customer.country,
+            req.totals.subtotal,
+            req.totals.tax,
+            req.totals.shipping,
+            req.totals.total,
+            session.id
         )
+
+        # ---------------- SAVE ORDER ITEMS ----------------
+        for item in req.cart:
+            await c.execute(
+                """
+                INSERT INTO order_items (
+                    order_id,
+                    product_name,
+                    price,
+                    quantity
+                ) VALUES (
+                    $1, $2, $3, $4
+                )
+                """,
+                order_id,
+                item.name,
+                item.price,
+                item.qty
+            )
+
+    # ---------------- RESPONSE ----------------
+    return {
+        "url": session.url,
+        "orderId": str(order_id)
+    }
 
 # ---------------- RESPONSE ----------------
 return {
