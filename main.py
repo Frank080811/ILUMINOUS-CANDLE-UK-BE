@@ -102,13 +102,21 @@ db_pool: asyncpg.Pool | None = None
 @app.on_event("startup")
 async def startup():
     global db_pool
-    db_pool = await asyncpg.create_pool(DATABASE_URL)
+
+    # Create connection pool
+    db_pool = await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=1,
+        max_size=10
+    )
 
     async with db_pool.acquire() as c:
+
+        # ---------------- ORDERS TABLE ----------------
         await c.execute("""
         CREATE TABLE IF NOT EXISTS orders (
             id UUID PRIMARY KEY,
-            status TEXT,
+            status TEXT NOT NULL,
             customer_name TEXT,
             email TEXT,
             phone TEXT,
@@ -117,33 +125,55 @@ async def startup():
             state TEXT,
             zip TEXT,
             country TEXT,
-            subtotal NUMERIC,
-            tax NUMERIC,
-            shipping NUMERIC,
-            total NUMERIC,
+            subtotal NUMERIC(10,2),
+            tax NUMERIC(10,2),
+            shipping NUMERIC(10,2),
+            total NUMERIC(10,2),
             stripe_session_id TEXT,
             email_sent BOOLEAN DEFAULT FALSE,
-            created_at TIMESTAMP DEFAULT NOW()
+            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
         );
         """)
 
+        # ---------------- ORDER ITEMS ----------------
         await c.execute("""
         CREATE TABLE IF NOT EXISTS order_items (
             id SERIAL PRIMARY KEY,
-            order_id UUID REFERENCES orders(id),
-            product_name TEXT,
-            price NUMERIC,
-            quantity INT
+            order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+            product_name TEXT NOT NULL,
+            price NUMERIC(10,2) NOT NULL,
+            quantity INT NOT NULL CHECK (quantity > 0)
         );
         """)
 
+        # ---------------- SHIPPING LABELS ----------------
         await c.execute("""
         CREATE TABLE IF NOT EXISTS shipping_labels (
             id UUID PRIMARY KEY,
-            order_id UUID REFERENCES orders(id),
-            label_pdf BYTEA
+            order_id UUID NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+            label_pdf BYTEA NOT NULL,
+            created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW()
         );
         """)
+
+        # ---------------- PERFORMANCE INDEXES ----------------
+        await c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_orders_status
+        ON orders(status);
+        """)
+
+        await c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_orders_created_at
+        ON orders(created_at);
+        """)
+
+        await c.execute("""
+        CREATE INDEX IF NOT EXISTS idx_order_items_order_id
+        ON order_items(order_id);
+        """)
+
+    print("✅ Database initialized successfully")
+
 
 # ================= MODELS =================
 class Item(BaseModel):
