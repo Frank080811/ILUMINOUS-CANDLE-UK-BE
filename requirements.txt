@@ -1,3 +1,10 @@
+
+
+# 🔐 AUTH (PIN THESE)
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+python-jose[cryptography]
+
 # ================= CORE =================
 fastapi
 uvicorn[standard]

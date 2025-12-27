@@ -67,20 +67,22 @@ app.add_middleware(
 )
 
 # ================= SECURITY =================
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+from passlib.context import CryptContext
+import os
+
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto"
+)
 
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
 ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH")
 
-if not ADMIN_EMAIL or not ADMIN_PASSWORD_HASH:
-    raise RuntimeError(
-        "ADMIN_EMAIL or ADMIN_PASSWORD_HASH is missing in environment variables"
-    )
+if not ADMIN_EMAIL:
+    raise RuntimeError("ADMIN_EMAIL is missing in environment variables")
 
-ADMIN_USER = {
-    "email": ADMIN_EMAIL,
-    "password_hash": ADMIN_PASSWORD_HASH
-}
+if not ADMIN_PASSWORD_HASH:
+    raise RuntimeError("ADMIN_PASSWORD_HASH is missing in environment variables")
 
 
 def admin_required(
