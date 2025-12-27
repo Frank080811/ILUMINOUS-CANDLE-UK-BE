@@ -30,6 +30,10 @@ from reportlab.graphics import renderPDF
 from reportlab.graphics.shapes import Drawing
 from PyPDF2 import PdfMerger
 
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
+security = HTTPBearer()
+
 # ================= ENV =================
 load_dotenv()
 
@@ -89,7 +93,8 @@ def admin_required(
             algorithms=[ALGORITHM]
         )
     except Exception:
-        raise HTTPException(401, "Invalid or expired token")
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+
 
 # ================= DB =================
 db_pool: asyncpg.Pool | None = None
