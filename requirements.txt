@@ -1,18 +1,38 @@
+# ================= CORE =================
 fastapi
+uvicorn[standard]
+
+# ================= ENV & CONFIG =================
+python-dotenv
+
+# ================= DATA & VALIDATION =================
 pydantic[email]
 email-validator
 python-multipart
-python-dotenv
-aiosmtplib
-uvicorn
-requests
-pydantic
-stripe
-sendgrid
-reportlab
-sqlalchemy>=2.0.0
+
+# ================= DATABASE =================
 asyncpg
+sqlalchemy>=2.0.0
+
+# ================= AUTH & SECURITY =================
+passlib[bcrypt]
+python-jose[cryptography]
+bcrypt
+
+# ================= PAYMENTS =================
+stripe
+
+# ================= EMAIL =================
+aiosmtplib
+sendgrid
+
+# ================= PDF / LABELS =================
+reportlab
 PyPDF2>=3.0.0
+
+# ================= HTTP =================
+requests
+
 
 
 

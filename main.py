@@ -22,9 +22,10 @@ from reportlab.graphics.shapes import Drawing
 from PyPDF2 import PdfMerger
 import io, tempfile
 
-
-
-
+from passlib.context import CryptContext
+from jose import jwt
+from datetime import datetime, timedelta
+from fastapi.security import HTTPBearer
 
 # ================== LOGGING ==================
 class RequestIdFilter(logging.Filter):
@@ -39,7 +40,7 @@ logging.basicConfig(
 
 logger = logging.getLogger("luminous-api")
 logger.addFilter(RequestIdFilter())
-
+security = HTTPBearer()
 # ================== ENV ==================
 load_dotenv()
 
@@ -51,6 +52,17 @@ FROM_EMAIL = os.getenv("FROM_EMAIL")
 
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY_TEST")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+# ================== ADMIN PORTAL ==================
+SECRET_KEY = os.getenv("ADMIN_JWT_SECRET")
+ALGORITHM = "HS256"
+pwd_context = CryptContext(schemes=["bcrypt"])
+
+ADMIN_USER = {
+    "email": os.getenv("ADMIN_EMAIL"),
+    "password_hash": pwd_context.hash(os.getenv("ADMIN_PASSWORD"))
+}
+
 
 # ================== APP ==================
 app = FastAPI(title="Luminous Candles API")
@@ -194,6 +206,28 @@ Luminous Candles Team
         s.login(SMTP_USER, SMTP_PASSWORD)
         s.send_message(msg)
 
+# ================== ADMIN LOGIN ==================
+class AdminLogin(BaseModel):
+    email: str
+    password: str
+
+@app.post("/admin/login")
+async def admin_login(data: AdminLogin):
+    if data.email != ADMIN_USER["email"]:
+        raise HTTPException(401, "Invalid credentials")
+
+    if not pwd_context.verify(data.password, ADMIN_USER["password_hash"]):
+        raise HTTPException(401, "Invalid credentials")
+
+    token = jwt.encode(
+        {"sub": data.email, "exp": datetime.utcnow() + timedelta(hours=8)},
+        SECRET_KEY,
+        algorithm=ALGORITHM
+    )
+
+    return {"access_token": token}
+
+
 # ================== CHECKOUT ==================
 @app.post("/create-checkout-session")
 async def create_checkout(req: CheckoutRequest):
@@ -266,6 +300,11 @@ async def create_checkout(req: CheckoutRequest):
         customer_email=req.customer.email,
         metadata={"order_id": str(order_id)},
     )
+
+    # ---------------- Protect Admin Routes ----------------
+def admin_required(token=Depends(security)):
+    payload = jwt.decode(token.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+    return payload
 
     # ---------------- DATABASE ----------------
     async with db_pool.acquire() as c:
@@ -547,6 +586,66 @@ async def get_order(order_id: str):
 
     return {"order": dict(order), "items": [dict(i) for i in items]}
 
+# ================== REVENUE ANALYTICS ==================
+@app.get("/admin/analytics")
+async def analytics(admin=Depends(admin_required)):
+    async with db_pool.acquire() as c:
+        revenue = await c.fetchval(
+            "SELECT SUM(total) FROM orders WHERE status='PAID'"
+        )
+        orders = await c.fetchval("SELECT COUNT(*) FROM orders")
+        today = await c.fetchval("""
+            SELECT SUM(total)
+            FROM orders
+            WHERE DATE(created_at)=CURRENT_DATE
+            AND status='PAID'
+        """)
+
+    return {
+        "totalRevenue": float(revenue or 0),
+        "totalOrders": orders,
+        "todayRevenue": float(today or 0)
+    }
+# ================== ORDER SEARCH & FILTER ==================
+@app.get("/admin/orders")
+async def orders(
+    q: str = "",
+    status: str = "",
+    admin=Depends(admin_required)
+):
+    query = """
+    SELECT * FROM orders
+    WHERE ($1='' OR email ILIKE '%'||$1||'%')
+      AND ($2='' OR status=$2)
+    ORDER BY created_at DESC
+    """
+    async with db_pool.acquire() as c:
+        return await c.fetch(query, q, status)
+
+# ================== RESEND CONFIRMATION EMAIL ==================
+@app.post("/admin/orders/{order_id}/resend-email")
+async def resend_email(order_id: str, admin=Depends(admin_required)):
+    async with db_pool.acquire() as c:
+        order = await c.fetchrow("SELECT * FROM orders WHERE id=$1", uuid.UUID(order_id))
+        items = await c.fetch(
+            "SELECT product_name, price, quantity FROM order_items WHERE order_id=$1",
+            uuid.UUID(order_id)
+        )
+
+    send_order_confirmation_email(
+        order["email"],
+        dict(order),
+        [dict(i) for i in items]
+    )
+
+    return {"status": "sent"}
+
+# ================== INVOICE PDF VIEW ==================
+@app.get("/admin/orders/{order_id}/invoice")
+async def invoice(order_id: str, admin=Depends(admin_required)):
+    pdf = generate_invoice_pdf(order_id)
+    return Response(pdf, media_type="application/pdf")
+
 # ================== SINGLE LABEL DOWNLOAD ==================
 @app.get("/admin/orders/{order_id}/label")
 async def download_label(order_id: str):
@@ -572,7 +671,8 @@ async def download_label(order_id: str):
     )
 
 @app.get("/admin/orders")
-async def get_all_orders():
+async def get_orders(admin=Depends(admin_required)):
+
     async with db_pool.acquire() as c:
         orders = await c.fetch("""
             SELECT *
