@@ -370,12 +370,6 @@ async def create_checkout(req: CheckoutRequest):
         "orderId": str(order_id)
     }
 
-# ---------------- RESPONSE ----------------
-return {
-    "url": session.url,
-    "orderId": str(order_id)
-}
-
 # ================= STRIPE WEBHOOK =================
 @app.post("/stripe/webhook")
 async def stripe_webhook(request: Request):
