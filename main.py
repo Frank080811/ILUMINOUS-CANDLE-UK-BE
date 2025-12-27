@@ -397,7 +397,7 @@ async def stripe_webhook(request: Request):
             payload, sig, STRIPE_WEBHOOK_SECRET
         )
     except Exception:
-        raise HTTPException(400, "Invalid signature")
+        raise HTTPException(400, "Invalid Stripe signature")
 
     if event["type"] != "checkout.session.completed":
         return {"status": "ignored"}
@@ -414,19 +414,22 @@ async def stripe_webhook(request: Request):
         if not order:
             raise HTTPException(404, "Order not found")
 
-        # 1️⃣ Mark as PAID
+        if order["status"] == "PAID":
+            return {"status": "already_processed"}
+
+        # ✅ 1. Mark order PAID
         await c.execute(
             "UPDATE orders SET status='PAID' WHERE id=$1",
             order_id
         )
 
-        # 2️⃣ Check if label already exists
-        exists = await c.fetchval(
+        # ✅ 2. Generate shipping label ONCE
+        label_exists = await c.fetchval(
             "SELECT 1 FROM shipping_labels WHERE order_id=$1",
             order_id
         )
 
-        if not exists:
+        if not label_exists:
             label_pdf = generate_shipping_label(dict(order))
 
             await c.execute(
@@ -439,33 +442,142 @@ async def stripe_webhook(request: Request):
                 label_pdf
             )
 
+        # ✅ 3. Fetch order items
+        items = await c.fetch(
+            """
+            SELECT product_name, price, quantity
+            FROM order_items
+            WHERE order_id=$1
+            """,
+            order_id
+        )
+
+        # ✅ 4. Send confirmation email ONCE
+        if not order["email_sent"]:
+            send_order_confirmation_email(
+                order["email"],
+                dict(order),
+                [dict(i) for i in items]
+            )
+
+            await c.execute(
+                "UPDATE orders SET email_sent=TRUE WHERE id=$1",
+                order_id
+            )
+
     return {"status": "ok"}
+
 
 # ================= LABEL GENERATION =================
 def generate_shipping_label(order: dict) -> bytes:
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-
     c = canvas.Canvas(tmp.name, pagesize=landscape(A6))
     width, height = landscape(A6)
 
-    margin_x = 12 * mm
-    margin_y = 10 * mm
+    margin = 12 * mm
 
     # ================= LOGO =================
-    logo_path = "images/logon.png"
-    logo_width = 28 * mm
-    logo_height = 28 * mm
+    logo_path = "images/LOGON.jpg"
+    logo_w = 26 * mm
+    logo_h = 26 * mm
 
     if os.path.exists(logo_path):
         c.drawImage(
             logo_path,
-            margin_x,
-            height - margin_y - logo_height,
-            width=logo_width,
-            height=logo_height,
+            margin,
+            height - margin - logo_h,
+            width=logo_w,
+            height=logo_h,
             preserveAspectRatio=True,
             mask="auto"
         )
+
+    # ================= TITLE =================
+    c.setFont("Helvetica-Bold", 14)
+    c.drawCentredString(
+        width / 2,
+        height - margin - 6,
+        "Shipping Label"
+    )
+
+    # ================= FROM =================
+    from_x = margin + logo_w + 10
+    from_y = height - margin - 16
+
+    c.setFont("Helvetica-Bold", 9)
+    c.drawString(from_x, from_y, "FROM:")
+
+    c.setFont("Helvetica", 8)
+    from_lines = [
+        "Luminous Candles Ltd",
+        "71–75 Shelton Street",
+        "Covent Garden",
+        "London WC2H 9JQ",
+        "United Kingdom"
+    ]
+
+    y = from_y - 10
+    for line in from_lines:
+        c.drawString(from_x, y, line)
+        y -= 9
+
+    # ================= TO =================
+    to_y = height - 90
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(margin, to_y, "TO:")
+
+    c.setFont("Helvetica-Bold", 12)
+    to_lines = [
+        order["customer_name"],
+        order["address"],
+        f"{order['city']}, {order['state']} {order['zip']}",
+        order["country"]
+    ]
+
+    y = to_y - 14
+    for line in to_lines:
+        c.drawString(margin, y, line)
+        y -= 14
+
+    # ================= ORDER ID ONLY =================
+    c.setFont("Helvetica", 8)
+    c.drawString(margin, 24, f"Order ID: {order['id']}")
+
+    # ================= QR CODE =================
+    qr_size = 32 * mm
+    qr_x = width - margin - qr_size
+    qr_y = 18
+
+    qr_widget = qr.QrCodeWidget(str(order["id"]))
+    bounds = qr_widget.getBounds()
+
+    d = Drawing(
+        qr_size,
+        qr_size,
+        transform=[
+            qr_size / (bounds[2] - bounds[0]), 0, 0,
+            qr_size / (bounds[3] - bounds[1]), 0, 0
+        ]
+    )
+    d.add(qr_widget)
+
+    renderPDF.draw(d, c, qr_x, qr_y)
+
+    c.setFont("Helvetica", 7)
+    c.drawCentredString(
+        qr_x + qr_size / 2,
+        qr_y - 6,
+        "Scan for Order"
+    )
+
+    c.showPage()
+    c.save()
+
+    with open(tmp.name, "rb") as f:
+        pdf = f.read()
+
+    os.unlink(tmp.name)
+    return pdf
 
     # ================= HEADER =================
     c.setFont("Helvetica-Bold", 14)
