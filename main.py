@@ -467,47 +467,52 @@ async def stripe_webhook(request: Request):
 
     return {"status": "ok"}
 
-
-# ================= LABEL GENERATION =================
 def generate_shipping_label(order: dict) -> bytes:
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
     c = canvas.Canvas(tmp.name, pagesize=landscape(A6))
     width, height = landscape(A6)
 
-    margin = 12 * mm
+    # ================= CONSTANTS =================
+    MARGIN = 12 * mm
+    LINE = 12
+    FONT_SMALL = 8
+    FONT_NORMAL = 10
+    FONT_LARGE = 14
 
-    # ================= LOGO =================
-    logo_path = "images/LOGON.jpg"
-    logo_w = 26 * mm
-    logo_h = 26 * mm
+    # ================= HEADER =================
+    header_y = height - MARGIN
+
+    # Logo (small, safe)
+    logo_path = "assets/logo.png"
+    logo_size = 20 * mm
 
     if os.path.exists(logo_path):
         c.drawImage(
             logo_path,
-            margin,
-            height - margin - logo_h,
-            width=logo_w,
-            height=logo_h,
+            MARGIN,
+            header_y - logo_size,
+            width=logo_size,
+            height=logo_size,
             preserveAspectRatio=True,
             mask="auto"
         )
 
-    # ================= TITLE =================
-    c.setFont("Helvetica-Bold", 14)
+    # Title
+    c.setFont("Helvetica-Bold", FONT_LARGE)
     c.drawCentredString(
         width / 2,
-        height - margin - 6,
+        header_y - 6,
         "Shipping Label"
     )
 
-    # ================= FROM =================
-    from_x = margin + logo_w + 10
-    from_y = height - margin - 16
+    # ================= FROM BLOCK =================
+    from_x = MARGIN + logo_size + 10
+    from_y = header_y - 10
 
-    c.setFont("Helvetica-Bold", 9)
+    c.setFont("Helvetica-Bold", FONT_SMALL)
     c.drawString(from_x, from_y, "FROM:")
 
-    c.setFont("Helvetica", 8)
+    c.setFont("Helvetica", FONT_SMALL)
     from_lines = [
         "Luminous Candles Ltd",
         "71–75 Shelton Street",
@@ -516,15 +521,16 @@ def generate_shipping_label(order: dict) -> bytes:
         "United Kingdom"
     ]
 
-    y = from_y - 10
+    y = from_y - LINE
     for line in from_lines:
         c.drawString(from_x, y, line)
-        y -= 9
+        y -= LINE
 
-    # ================= TO =================
-    to_y = height - 90
-    c.setFont("Helvetica-Bold", 10)
-    c.drawString(margin, to_y, "TO:")
+    # ================= TO BLOCK =================
+    to_start_y = header_y - logo_size - 35
+
+    c.setFont("Helvetica-Bold", FONT_NORMAL)
+    c.drawString(MARGIN, to_start_y, "TO:")
 
     c.setFont("Helvetica-Bold", 12)
     to_lines = [
@@ -534,18 +540,22 @@ def generate_shipping_label(order: dict) -> bytes:
         order["country"]
     ]
 
-    y = to_y - 14
+    y = to_start_y - 16
     for line in to_lines:
-        c.drawString(margin, y, line)
-        y -= 14
+        c.drawString(MARGIN, y, line)
+        y -= 16
 
-    # ================= ORDER ID ONLY =================
-    c.setFont("Helvetica", 8)
-    c.drawString(margin, 24, f"Order ID: {order['id']}")
+    # ================= ORDER ID =================
+    c.setFont("Helvetica", FONT_SMALL)
+    c.drawString(
+        MARGIN,
+        22,
+        f"Order ID: {order['id']}"
+    )
 
     # ================= QR CODE =================
-    qr_size = 32 * mm
-    qr_x = width - margin - qr_size
+    qr_size = 30 * mm
+    qr_x = width - MARGIN - qr_size
     qr_y = 18
 
     qr_widget = qr.QrCodeWidget(str(order["id"]))
@@ -570,6 +580,7 @@ def generate_shipping_label(order: dict) -> bytes:
         "Scan for Order"
     )
 
+    # ================= FINALIZE =================
     c.showPage()
     c.save()
 
@@ -578,6 +589,8 @@ def generate_shipping_label(order: dict) -> bytes:
 
     os.unlink(tmp.name)
     return pdf
+
+
 
     # ================= HEADER =================
     c.setFont("Helvetica-Bold", 14)
