@@ -328,10 +328,10 @@ def admin_required(token=Depends(security)):
         req.customer.state,
         req.customer.zip,
         req.customer.country,
-        subtotal,
-        tax,
-        shipping,
-        total,
+        req.totals.subtotal,
+        req.totals.tax,
+        req.totals.shipping,
+        req.totals.total,
         session.id
         )
 
@@ -339,7 +339,12 @@ def admin_required(token=Depends(security)):
             await c.execute("""
             INSERT INTO order_items (order_id, product_name, price, quantity)
             VALUES ($1,$2,$3,$4)
-            """, order_id, i.name, i.price, i.qty)
+            """,
+            order_id,
+            i.name,
+            i.price,
+            i.qty
+            )
 
     return {
         "url": session.url,
