@@ -63,13 +63,21 @@ app.add_middleware(
 )
 
 # ================= SECURITY =================
-security = HTTPBearer()
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
+ADMIN_PASSWORD_HASH = os.getenv("ADMIN_PASSWORD_HASH")
+
+if not ADMIN_EMAIL or not ADMIN_PASSWORD_HASH:
+    raise RuntimeError(
+        "ADMIN_EMAIL or ADMIN_PASSWORD_HASH is missing in environment variables"
+    )
 
 ADMIN_USER = {
     "email": ADMIN_EMAIL,
-    "password_hash": pwd_context.hash(ADMIN_PASSWORD)
+    "password_hash": ADMIN_PASSWORD_HASH
 }
+
 
 def admin_required(
     token: HTTPAuthorizationCredentials = Depends(security)
