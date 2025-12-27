@@ -428,6 +428,38 @@ def generate_shipping_label(order: dict) -> bytes:
     os.unlink(tmp.name)
     return pdf
 
+# ================== FETCH ORDER (CUSTOMER) ==================
+@app.get("/order/{order_id}")
+async def get_order(order_id: str):
+    try:
+        oid = uuid.UUID(order_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid order ID")
+
+    async with db_pool.acquire() as c:
+        order = await c.fetchrow(
+            "SELECT * FROM orders WHERE id=$1",
+            oid
+        )
+
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+
+        items = await c.fetch(
+            """
+            SELECT product_name, price, quantity
+            FROM order_items
+            WHERE order_id=$1
+            """,
+            oid
+        )
+
+    return {
+        "order": dict(order),
+        "items": [dict(i) for i in items]
+    }
+
+
 # ================= ADMIN ROUTES =================
 @app.get("/admin/orders")
 async def get_orders(admin=Depends(admin_required)):
