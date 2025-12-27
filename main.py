@@ -406,10 +406,38 @@ async def stripe_webhook(request: Request):
     order_id = uuid.UUID(session["metadata"]["order_id"])
 
     async with db_pool.acquire() as c:
+        order = await c.fetchrow(
+            "SELECT * FROM orders WHERE id=$1",
+            order_id
+        )
+
+        if not order:
+            raise HTTPException(404, "Order not found")
+
+        # 1️⃣ Mark as PAID
         await c.execute(
             "UPDATE orders SET status='PAID' WHERE id=$1",
             order_id
         )
+
+        # 2️⃣ Check if label already exists
+        exists = await c.fetchval(
+            "SELECT 1 FROM shipping_labels WHERE order_id=$1",
+            order_id
+        )
+
+        if not exists:
+            label_pdf = generate_shipping_label(dict(order))
+
+            await c.execute(
+                """
+                INSERT INTO shipping_labels (id, order_id, label_pdf)
+                VALUES ($1, $2, $3)
+                """,
+                uuid.uuid4(),
+                order_id,
+                label_pdf
+            )
 
     return {"status": "ok"}
 
