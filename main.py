@@ -236,21 +236,35 @@ Total Paid: £{order['total']:.2f}
         s.send_message(msg)
 
 # ================= ADMIN LOGIN =================
+# ================= ADMIN LOGIN =================
 @app.post("/admin/login")
 async def admin_login(data: AdminLogin):
-    if data.email != ADMIN_USER["email"]:
-        raise HTTPException(401, "Invalid credentials")
 
-    if not pwd_context.verify(data.password, ADMIN_USER["password_hash"]):
-        raise HTTPException(401, "Invalid credentials")
+    # 1️⃣ Email check
+    if data.email.strip().lower() != ADMIN_EMAIL.lower():
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
+    # 2️⃣ Password check (bcrypt-safe, 72-byte limit)
+    password = data.password.encode("utf-8")[:72]
+
+    if not pwd_context.verify(password, ADMIN_PASSWORD_HASH):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    # 3️⃣ Issue JWT
     token = jwt.encode(
-        {"sub": data.email, "exp": datetime.utcnow() + timedelta(hours=8)},
+        {
+            "sub": data.email,
+            "exp": datetime.utcnow() + timedelta(hours=8)
+        },
         SECRET_KEY,
         algorithm=ALGORITHM
     )
 
-    return {"access_token": token}
+    return {
+        "access_token": token,
+        "token_type": "bearer"
+    }
+
 
 # ================= CHECKOUT =================
 @app.post("/create-checkout-session")
