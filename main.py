@@ -483,7 +483,7 @@ def generate_shipping_label(order: dict) -> bytes:
     header_y = height - MARGIN
 
     # Logo (small, safe)
-    logo_path = "assets/logo.png"
+    logo_path = "images/LOGON.jpg"
     logo_size = 20 * mm
 
     if os.path.exists(logo_path):
